@@ -25,6 +25,7 @@ const state = {
   busy: false,
   reqId: 0,
   pull: null, // { id, model, pct, status }
+  debug: [], // what the model did, for troubleshooting (Copy log)
 };
 
 const pref = (k, d) => {
@@ -514,16 +515,23 @@ async function runTool(name, args, out) {
 function systemPrompt(vision) {
   return `You are the takeoff assistant built into Gridline, a construction quantity takeoff and estimating app. You work for a professional estimator. You run entirely on their PC.
 
-How to work:
-- Use the tools to look at the project and make changes. Start with get_overview when you need sheet or condition names.
+Rules:
+- Do the work with the tools. Keep calling tools until the request is complete; never reply "done" before you have actually made changes or found the answer.
+- Use only sheet and condition names that exist (get_overview lists them) or that you just created. Never invent names to test tools.
 - Never invent quantities. Report numbers only from tool results, with units (LF, SF, SQ, CY, EA).
-- To measure rooms, prefer fill_rooms with room labels (read_sheet_text or find_text shows them). Sheets need a scale first; use set_scale with "detect" if they have none.
-- Tags and labels (door tags, fixture tags) can be counted with count_text. Repeated symbols can be counted with count_symbols if you know a box around one example.
-- Create a condition before measuring into it. Use clear trade names (e.g. "Carpet tile", "VCT", "5/8\\" GWB partition").
-- ${vision ? 'You can call look_at_sheet to see the drawing when text is not enough.' : 'You cannot see images; rely on text and geometry tools.'}
-- If the request is ambiguous (which sheet, which material), make the sensible choice and say what you chose, or ask one short question.
-- Everything you change can be undone in one click, so act, then summarize what you did in a few plain sentences. Mention anything that failed (e.g. rooms that were not enclosed) so the estimator can check it.
-- Be brief. No markdown tables. Use short lists only when listing several items.`;
+- Create a condition before measuring into it. Use clear trade names (e.g. "Fiber cement siding", "Brick veneer", "EIFS", "5/8\\" GWB partition") and a group (CSI division).
+- Sheets need a scale before measuring. If a sheet has none, call set_scale with "detect".
+- ${vision ? 'Call look_at_sheet to see the drawing whenever text alone is not enough. Image pixels convert to page points with the formula it gives you.' : 'You cannot see images; rely on text and geometry tools.'}
+
+Floor plans: measure rooms with fill_rooms using room labels (or ["all"]). Count tags with count_text; count repeated symbols with count_symbols.
+
+Exterior elevations and facades:
+1. Find what each material is: read the finish/material schedule or legend (read_sheet_text with contains "SCHEDULE" or "LEGEND", or the sheet a note points to), and the tags on the elevation (e.g. P-1, BR-1, MP-2, EIFS-1, FC-1).
+2. Create one area condition per exterior material (group "Exterior finishes"), named after the schedule description.
+3. For each elevation view on the sheet, measure each material zone: look at the region, then either fill_rooms with points inside the zone (works when the zone is a closed outline without hatch lines) or draw_markup with the zone's outline corners in page points. Work one elevation at a time and keep going until every elevation on the sheet is done.
+4. Note the elevation scale in its title (e.g. 1/8" = 1'-0") — make sure the sheet scale matches.
+
+When finished, reply with a short plain summary: what you created and the quantities per condition. Mention anything you could not measure so the estimator can check it. Be brief; no tables.`;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -539,21 +547,55 @@ async function capsFor(model) {
 
 const stripThink = (s) => String(s || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 
+/**
+ * Some models write tool calls into their text instead of the structured field
+ * (e.g. <tool_call>{"name": ..., "arguments": {...}}</tool_call> or a bare JSON object).
+ * Recover those so the request still runs.
+ */
+function recoverToolCalls(text) {
+  if (!text) return [];
+  const out = [];
+  const tryAdd = (raw) => {
+    try {
+      const j = JSON.parse(raw);
+      const list = Array.isArray(j) ? j : [j];
+      for (const c of list) {
+        const name = c.name || (c.function && c.function.name);
+        const args = c.arguments || c.parameters || (c.function && c.function.arguments) || {};
+        if (name && TOOL_DEFS.some((t) => t.name === name)) out.push({ function: { name, arguments: args } });
+      }
+    } catch {}
+  };
+  for (const m of text.matchAll(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g)) tryAdd(m[1]);
+  if (!out.length) for (const m of text.matchAll(/```(?:json)?\s*([\[{][\s\S]*?[\]}])\s*```/g)) tryAdd(m[1]);
+  if (!out.length) {
+    const t = text.trim();
+    if (/^[\[{][\s\S]*[\]}]$/.test(t)) tryAdd(t);
+  }
+  return out;
+}
+
 async function ask(text) {
   if (state.busy || !text.trim()) return;
   state.busy = true;
   renderInput();
   const caps = await capsFor(state.model);
   const vision = caps.includes('vision');
+  const think = caps.includes('thinking') ? true : undefined;
   addBubble('user', text);
   state.history.push({ role: 'user', content: text });
   const mark = historyMark();
-  const thinking = addBubble('pending', 'Working on it…');
+  const thinking = addBubble('pending', 'Thinking…');
   const id = 'chat' + ++state.reqId;
   state.currentId = id;
+  state.debug.push({ t: new Date().toISOString(), user: text, model: state.model, caps });
   let finalText = '';
+  let actions = 0;
+  let changes = 0;
+  let nudges = 0;
+  const MAX_STEPS = 40;
   try {
-    for (let step = 0; step < 16; step++) {
+    for (let step = 0; step < MAX_STEPS; step++) {
       // Only the newest image stays in context, to keep requests fast.
       let seenImage = false;
       for (let i = state.history.length - 1; i >= 0; i--) {
@@ -565,19 +607,43 @@ async function ask(text) {
       const res = await api.ai.chat({
         id,
         model: state.model,
-        messages: [{ role: 'system', content: systemPrompt(vision) }, ...state.history.slice(-40)],
+        think,
+        messages: [{ role: 'system', content: systemPrompt(vision) }, ...state.history.slice(-60)],
         tools: toolSchemas(vision),
       });
       if (res.cancelled) {
-        finalText = 'Stopped.';
+        finalText = actions ? 'Stopped. The changes made so far are kept (you can undo them below).' : 'Stopped.';
         break;
       }
       if (res.error) throw new Error(res.error);
       const msg = res.message || {};
-      const calls = msg.tool_calls || [];
+      let calls = msg.tool_calls || [];
+      const content = stripThink(msg.content);
+      if (!calls.length) {
+        calls = recoverToolCalls(content);
+        if (!calls.length) calls = recoverToolCalls(msg.thinking || '');
+      }
+      state.debug.push({ step, content: (msg.content || '').slice(0, 2000), thinking: (msg.thinking || '').slice(0, 2000), tool_calls: calls });
       state.history.push({ role: 'assistant', content: msg.content || '', ...(calls.length ? { tool_calls: calls } : {}) });
       if (!calls.length) {
-        finalText = stripThink(msg.content) || 'Done.';
+        if (content) {
+          finalText = content;
+          break;
+        }
+        // Empty reply: push the model to continue instead of silently ending.
+        if (nudges < 2) {
+          nudges++;
+          state.history.push({
+            role: 'user',
+            content: actions
+              ? 'Continue the task with the tools until it is complete, then reply with a short summary of what you did and the quantities.'
+              : 'You have not done anything yet. Start now: call the tools needed for my request (begin with get_overview if you need names). Do not reply until you have made progress.',
+          });
+          continue;
+        }
+        finalText = changes
+          ? 'Done — the changes are listed above.'
+          : "The model stopped without doing anything. Try a more specific request — name the sheet and the material, e.g. “On A-203, create a condition for each exterior finish in the schedule”. If it keeps happening, use Copy log (top of this panel) and send it to me.";
         break;
       }
       for (const call of calls) {
@@ -600,15 +666,20 @@ async function ask(text) {
           result = { error: String(e.message || e) };
           addActivity(fn.name, args, result, true);
         }
+        actions++;
+        if (out.changed) changes++;
+        state.debug.push({ tool: fn.name, args, result: JSON.stringify(result).slice(0, 1500) });
         state.history.push({ role: 'tool', tool_name: fn.name, name: fn.name, content: JSON.stringify(result) });
         if (out.image) state.history.push({ role: 'user', content: `Image of sheet ${out.image.sheet}:`, images: [out.image.data] });
       }
-      if (step === 15) finalText = "I've stopped here to check in — tell me if you want me to keep going.";
+      thinking.querySelector('.txt').textContent = 'Thinking…';
+      if (step === MAX_STEPS - 1) finalText = "I've done a lot of steps, so I'm pausing here — tell me to keep going and I'll continue.";
     }
   } catch (e) {
     finalText = '';
     addBubble('error', friendlyError(e));
-    state.history.pop(); // drop the user turn that failed so a retry starts clean
+    state.debug.push({ error: String(e.message || e) });
+    if (!actions) state.history.pop(); // drop the failed turn so a retry starts clean
   }
   thinking.remove();
   const grouped = squashHistory(mark);
@@ -628,6 +699,20 @@ async function ask(text) {
   ctx.refresh();
   state.busy = false;
   renderInput();
+}
+
+function copyLog() {
+  const text = JSON.stringify({ app: 'Gridline', model: state.model, entries: state.debug.slice(-200) }, null, 2);
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {}
+  ta.remove();
+  toast(ok ? 'Assistant log copied — paste it into a message.' : "Couldn't copy the log.", { kind: ok ? 'ok' : 'err' });
 }
 
 function friendlyError(e) {
@@ -703,6 +788,7 @@ export async function renderAssistant() {
       <div class="ai-head">
         <span class="ai-title">${icon('sparkle', 16)} Assistant</span>
         <span class="ai-model" id="aiModel"></span>
+        <button class="icon-btn" id="aiLog2" title="Copy log (for troubleshooting)">${icon('copy', 15)}</button>
         <button class="icon-btn" id="aiClear" title="New conversation">${icon('refresh', 15)}</button>
       </div>
       <div class="ai-setup" id="aiSetup" hidden></div>
@@ -735,6 +821,7 @@ export async function renderAssistant() {
       if (!st.models.some((m) => m.name === RECOMMENDED_MODEL)) items.push('-', { label: `Download ${RECOMMENDED_LABEL} (${RECOMMENDED_SIZE})`, icon: 'download', run: () => { $('#aiInputWrap').hidden = true; pullModel(RECOMMENDED_MODEL); refreshStatus(); } });
       contextMenu(r.left - 120, r.bottom + 4, items);
     };
+    $('#aiLog2').onclick = copyLog;
     $('#aiClear').onclick = () => {
       if (state.busy) return;
       state.history = [];
@@ -820,11 +907,15 @@ function addBubble(kind, text) {
 }
 
 function addActivity(name, args, result, isErr = false) {
-  const s = activitySummary(name, args, result);
-  if (!s) return;
+  let s = activitySummary(name, args, result);
+  let quiet = false;
+  if (!s) {
+    s = toolLabel(name, args).replace(/…$/, '');
+    quiet = true;
+  }
   const log = $('#aiLog');
   const pending = log.querySelector('.ai-msg.pending');
-  const n = h(`<div class="ai-act ${isErr || result.error ? 'err' : ''}">${icon(isErr || result.error ? 'x' : 'layers', 13)}<span>${esc(s)}</span></div>`);
+  const n = h(`<div class="ai-act ${isErr || result.error ? 'err' : quiet ? 'quiet' : ''}">${icon(isErr || result.error ? 'x' : quiet ? 'search' : 'layers', 13)}<span>${esc(s)}</span></div>`);
   pending ? log.insertBefore(n, pending) : log.append(n);
   log.scrollTop = log.scrollHeight;
 }

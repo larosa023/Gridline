@@ -111,14 +111,22 @@ function init(window) {
   });
 
   // One chat turn (non-streaming). The renderer runs the tool loop.
-  ipcMain.handle('ai:chat', async (_e, { id, model, messages, tools, options }) => {
+  ipcMain.handle('ai:chat', async (_e, { id, model, messages, tools, options, think }) => {
     const ac = new AbortController();
     aborts.set(id, ac);
     try {
       const j = await getJson('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model, messages, tools, stream: false, keep_alive: '15m', options: { num_ctx: 16384, temperature: 0.2, ...(options || {}) } }),
+        body: JSON.stringify({
+          model,
+          messages,
+          tools,
+          stream: false,
+          keep_alive: '15m',
+          ...(think != null ? { think } : {}),
+          options: { num_ctx: 24576, temperature: 0.2, ...(options || {}) },
+        }),
         signal: ac.signal,
       });
       return { message: j.message, stats: { evalCount: j.eval_count, ms: j.total_duration ? Math.round(j.total_duration / 1e6) : null } };

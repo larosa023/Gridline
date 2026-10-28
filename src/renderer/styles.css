@@ -1887,6 +1887,12 @@ kbd {
   margin-top: 2px;
   color: var(--ok);
 }
+.ai-act.quiet {
+  color: var(--muted);
+}
+.ai-act.quiet .ico {
+  color: var(--muted);
+}
 .ai-act.err .ico,
 .ai-act.err {
   color: var(--danger);
