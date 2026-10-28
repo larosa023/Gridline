@@ -62,7 +62,7 @@ Stack: Electron, PDF.js, plain ES modules (no framework, no bundler), electron-b
 npm run release:patch   # 1.0.0 -> 1.0.1, commits, tags and pushes
 ```
 
-Pushing a `v*` tag runs the **Release** workflow on GitHub Actions: it tests, builds the NSIS installer, and publishes `Gridline-Setup-x.y.z.exe`, `Gridline-Setup.exe` and `latest.yml` to a GitHub Release. Every installed copy then finds the update on its next check.
+Any push to `main` that carries a new `version` in `package.json` (or a pushed `v*` tag) runs the **Release** workflow on GitHub Actions: it tests, builds the NSIS installer, and publishes `Gridline-Setup-x.y.z.exe`, `Gridline-Setup.exe` and `latest.yml` to a GitHub Release tagged `vX.Y.Z`. Pushes that don't change the version are skipped. Every installed copy then finds the update on its next check.
 
 ## License
 
