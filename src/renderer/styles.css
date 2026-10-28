@@ -593,6 +593,11 @@ button {
   color: var(--text-2);
   white-space: nowrap;
 }
+.chip.auto {
+  color: #22b8cf;
+  border-color: rgba(34, 184, 207, 0.4);
+  background: rgba(34, 184, 207, 0.1);
+}
 .chip.warn {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
@@ -1735,4 +1740,24 @@ kbd {
 .switch:focus-visible {
   box-shadow: var(--focus);
   outline: none;
+}
+
+.match-bar {
+  gap: 12px;
+  white-space: nowrap;
+  max-width: calc(100% - 60px);
+}
+.match-bar #matchText {
+  font-weight: 500;
+}
+.match-sens {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+.match-sens input {
+  width: 120px;
+  accent-color: var(--accent);
+  direction: rtl;
 }

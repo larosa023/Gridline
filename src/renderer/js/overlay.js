@@ -12,13 +12,36 @@ export function initOverlay(el, snapEl) {
 }
 
 /** Cheap redraw of just the snap marker (runs on every mouse move). */
+let auxState = { box: null, proposals: null };
+/** Extra things drawn on the light layer: a selection box and match proposals. */
+export function setAux(next) {
+  auxState = { ...auxState, ...next };
+}
+
 export function drawSnapLayer(snap) {
   if (!snapSvg) return;
   const z = view.zoom;
+  const px = (n) => n / z;
   snapSvg.setAttribute('width', view.pageW * z);
   snapSvg.setAttribute('height', view.pageH * z);
   snapSvg.setAttribute('viewBox', `0 0 ${view.pageW} ${view.pageH}`);
-  snapSvg.innerHTML = snap && view.pageKey ? snapMarker(snap, (n) => n / z) : '';
+  if (!view.pageKey) return (snapSvg.innerHTML = '');
+  let s = '';
+  const { box, proposals } = auxState;
+  if (proposals && proposals.pageKey === view.pageKey) {
+    const r = Math.max(px(9), proposals.radius || 0);
+    for (const c of proposals.items) {
+      const on = c.score >= proposals.cutoff && !c.off;
+      s += `<circle cx="${c.p[0]}" cy="${c.p[1]}" r="${r}" fill="${on ? proposals.color : 'none'}" fill-opacity="0.18" stroke="${on ? proposals.color : '#8d9bb0'}" stroke-width="${on ? 2.5 : 1.5}" stroke-dasharray="${on ? '0' : '4 3'}" vector-effect="non-scaling-stroke"/>`;
+      if (on) s += `<path d="M${c.p[0] - r * 0.35} ${c.p[1]} l${r * 0.25} ${r * 0.28} l${r * 0.45} ${-r * 0.55}" fill="none" stroke="${proposals.color}" stroke-width="2.5" vector-effect="non-scaling-stroke"/>`;
+    }
+  }
+  if (box) {
+    const [x0, y0, x1, y1] = box;
+    s += `<rect x="${Math.min(x0, x1)}" y="${Math.min(y0, y1)}" width="${Math.abs(x1 - x0)}" height="${Math.abs(y1 - y0)}" fill="rgba(34,184,207,0.08)" stroke="#22b8cf" stroke-width="1.5" stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/>`;
+  }
+  if (snap) s += snapMarker(snap, px);
+  snapSvg.innerHTML = s;
 }
 
 export function scaleFor(pageKey) {

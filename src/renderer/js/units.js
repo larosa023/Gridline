@@ -160,3 +160,83 @@ export const UNIT_LABELS = {
   ft: { length: 'LF', area: 'SF', volume: 'CY', count: 'EA' },
   m: { length: 'm', area: 'm²', volume: 'm³', count: 'EA' },
 };
+
+// ---------- Scale detection from sheet text ----------
+
+const Q_IN = `["”″]|''`; // inch mark (some CAD fonts emit two apostrophes)
+const Q_FT = `['’′]`;
+
+function fracToNum(s) {
+  s = s.trim().replace(/\s*-\s*/, ' ');
+  const m = s.match(/^(\d+)?\s*(?:(\d+)\/(\d+))?$/);
+  if (!m || (m[1] == null && m[2] == null)) return NaN;
+  return (m[1] ? +m[1] : 0) + (m[2] ? +m[2] / +m[3] : 0);
+}
+
+/**
+ * Find drawing scales written on a sheet, e.g. `SCALE: 1/4" = 1'-0"`, `1 1/2"=1'-0"`,
+ * `1" = 20'-0"`, `1:100`. Returns candidates [{ scale:{ptPerUnit,unit,label}, labeled }]
+ * where `labeled` means the text was introduced by the word SCALE.
+ */
+export function findScalesInText(text) {
+  const out = [];
+  if (!text) return out;
+  const t = text.replace(/\s+/g, ' ');
+  const arch = new RegExp(`(\\d+(?:\\s*-?\\s*\\d+\\/\\d+)?|\\d+\\/\\d+)\\s*(?:${Q_IN})\\s*=\\s*1\\s*${Q_FT}\\s*-?\\s*0?\\s*(?:${Q_IN})?`, 'g');
+  const eng = new RegExp(`1\\s*(?:${Q_IN})\\s*=\\s*(\\d{1,4})\\s*${Q_FT}(?:\\s*-?\\s*0\\s*(?:${Q_IN}))?`, 'g');
+  const met = /\b1\s*:\s*(\d{1,4})\b/g;
+  const labeledAt = (i) => /scale\s*[:=]?\s*$/i.test(t.slice(Math.max(0, i - 14), i));
+  let m;
+  while ((m = arch.exec(t))) {
+    const paper = fracToNum(m[1]);
+    if (!(paper > 0 && paper <= 12)) continue;
+    out.push({ scale: archScale(paper), labeled: labeledAt(m.index), at: m.index });
+  }
+  while ((m = eng.exec(t))) {
+    const real = +m[1];
+    if (!(real >= 2)) continue; // 1" = 1'-0" is handled as architectural
+    out.push({ scale: { ptPerUnit: 72 / real, unit: 'ft', label: `1" = ${real}'` }, labeled: labeledAt(m.index), at: m.index });
+  }
+  while ((m = met.exec(t))) {
+    const r = +m[1];
+    if (!(r >= 5 && r <= 5000)) continue;
+    // Plain ratios are common in other contexts (slopes "1:12"), so only trust labeled ones.
+    if (!labeledAt(m.index)) continue;
+    out.push({ scale: { ptPerUnit: (1000 / r) * (72 / 25.4), unit: 'm', label: `1:${r}` }, labeled: true, at: m.index });
+  }
+  return out;
+}
+
+function archScale(paperIn) {
+  const whole = Math.floor(paperIn + 1e-9);
+  const frac = paperIn - whole;
+  let fs = '';
+  if (frac > 1e-6) {
+    for (const d of [2, 4, 8, 16, 32, 64]) {
+      const n = Math.round(frac * d);
+      if (Math.abs(n / d - frac) < 1e-6) {
+        fs = `${n}/${d}`;
+        break;
+      }
+    }
+  }
+  const label = whole && fs ? `${whole}-${fs}"` : fs ? `${fs}"` : `${whole}"`;
+  return { ptPerUnit: 72 * paperIn, unit: 'ft', label: `${label} = 1'-0"` };
+}
+
+/**
+ * Pick the sheet's main scale: ignores sheets marked NTS-only, prefers scales labeled "SCALE",
+ * then the most frequent. Returns { scale, ambiguous } or null.
+ */
+export function pickSheetScale(text) {
+  const c = findScalesInText(text);
+  if (!c.length) return null;
+  const pool = c.some((x) => x.labeled) ? c.filter((x) => x.labeled) : c;
+  const tally = new Map();
+  for (const x of pool) {
+    const k = x.scale.label;
+    tally.set(k, { scale: x.scale, n: (tally.get(k)?.n || 0) + 1 });
+  }
+  const ranked = [...tally.values()].sort((a, b) => b.n - a.n);
+  return { scale: ranked[0].scale, ambiguous: ranked.length > 1 && ranked[1].n === ranked[0].n };
+}

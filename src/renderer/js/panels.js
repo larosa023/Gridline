@@ -110,7 +110,7 @@ function sheetRow(key, d) {
     <div class="sheet-meta">
       <div class="sheet-name" title="Double-click to rename">${esc(pg.name || 'Page ' + n)}</div>
       <div class="sheet-sub">
-        ${pg.scale ? `<span class="chip">${esc(pg.scale.label)}</span>` : `<span class="chip warn">No scale</span>`}
+        ${pg.scale ? `<span class="chip ${pg.scale.auto ? 'auto' : ''}" title="${pg.scale.auto ? 'Read from the title block — verify with Measure' : ''}">${esc(pg.scale.label)}${pg.scale.auto ? ' · auto' : ''}</span>` : `<span class="chip warn">No scale</span>`}
         ${marks ? `<span>${marks} markup${marks > 1 ? 's' : ''}</span>` : ''}
       </div>
     </div></div>`);
@@ -124,6 +124,7 @@ function sheetRow(key, d) {
     contextMenu(e.clientX, e.clientY, [
       { label: 'Rename sheet', icon: 'tag', run: () => renameSheet(row, key) },
       { label: 'Copy scale to all sheets', icon: 'copy', run: () => actions.copyScaleToAll(key) },
+      { label: 'Read scale from title block', icon: 'calibrate', run: () => actions.detectScales([key], true) },
       '-',
       { label: `Close "${d.name}"`, icon: 'x', danger: true, run: () => actions.removeDocument(d.id) },
     ]);

@@ -79,6 +79,7 @@ export function unloadDocument(docId) {
   for (const k of [...pageCache.keys()]) if (k.startsWith(docId + ':')) pageCache.delete(k);
   for (const k of [...thumbCache.keys()]) if (k.startsWith(docId + ':')) thumbCache.delete(k);
   for (const k of [...snapCache.keys()]) if (k.startsWith(docId + ':')) snapCache.delete(k);
+  for (const k of [...textCache.keys()]) if (k.startsWith(docId + ':')) textCache.delete(k);
 }
 
 export function unloadAll() {
@@ -95,27 +96,95 @@ async function getPage(pageKey) {
   return page;
 }
 
+const textCache = new Map(); // pageKey -> Promise<{ items, text }>
+
+/**
+ * Page text with positions in viewer space (top-left origin, points).
+ * items: [{ str, x, y, w, h }] where (x, y) is the baseline start.
+ */
+export function getPageText(pageKey) {
+  if (!textCache.has(pageKey)) {
+    textCache.set(
+      pageKey,
+      (async () => {
+        const page = await getPage(pageKey);
+        const vp = page.getViewport({ scale: 1 });
+        const tc = await page.getTextContent();
+        const items = [];
+        for (const it of tc.items) {
+          const str = (it.str || '').trim();
+          if (!str) continue;
+          const [x, y] = vp.convertToViewportPoint(it.transform[4], it.transform[5]);
+          const size = Math.hypot(it.transform[2], it.transform[3]) || Math.hypot(it.transform[0], it.transform[1]);
+          items.push({ str, x, y, w: it.width || str.length * size * 0.5, h: size });
+        }
+        return { items, text: items.map((i) => i.str).join(' ') };
+      })().catch(() => ({ items: [], text: '' }))
+    );
+  }
+  return textCache.get(pageKey);
+}
+
 /** Try to read a sheet number/title from the page's text (e.g. "A-101"). */
 export async function guessSheetName(pageKey) {
   try {
+    const { items } = await getPageText(pageKey);
     const page = await getPage(pageKey);
-    const tc = await page.getTextContent();
     const vp = page.getViewport({ scale: 1 });
     const re = /^[A-Z]{1,3}[-.\s]?\d{1,3}(?:\.\d{1,2})?[A-Z]?$/;
     let best = null;
-    for (const it of tc.items) {
-      const s = (it.str || '').trim();
-      if (!re.test(s)) continue;
-      const [x, y] = [it.transform[4], it.transform[5]];
-      const size = Math.hypot(it.transform[0], it.transform[1]);
+    for (const it of items) {
+      if (!re.test(it.str)) continue;
       // Prefer large text near the bottom-right title block.
-      const score = size * 2 + (x / vp.width) * 10 + (1 - y / vp.height) * 10;
-      if (!best || score > best.score) best = { s, score };
+      const score = it.h * 2 + (it.x / vp.width) * 10 + (it.y / vp.height) * 10;
+      if (!best || score > best.score) best = { s: it.str, score };
     }
     return best ? best.s.replace(/\s/, '-') : null;
   } catch {
     return null;
   }
+}
+
+/** Render a sheet to grayscale at `r` pixels per point (for symbol matching / AI vision). */
+export async function renderGray(pageKey, r) {
+  const page = await getPage(pageKey);
+  const vp = page.getViewport({ scale: r });
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(vp.width);
+  c.height = Math.ceil(vp.height);
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, canvas: c, viewport: vp, annotationMode: pdfjs.AnnotationMode.ENABLE }).promise;
+  const d = ctx.getImageData(0, 0, c.width, c.height).data;
+  const img = new Uint8Array(c.width * c.height);
+  for (let i = 0, j = 0; i < img.length; i++, j += 4) img[i] = (d[j] * 77 + d[j + 1] * 150 + d[j + 2] * 29) >> 8;
+  return { img, W: c.width, H: c.height, r };
+}
+
+/** Render a sheet (or a region of it, in page points) to a JPEG data URL, longest side `max` px. */
+export async function renderJpeg(pageKey, max = 1600, region = null) {
+  const page = await getPage(pageKey);
+  const base = page.getViewport({ scale: 1 });
+  const rw = region ? region[2] : base.width;
+  const rh = region ? region[3] : base.height;
+  const s = Math.min(4, max / Math.max(rw, rh));
+  const vp = page.getViewport({ scale: s });
+  const c = document.createElement('canvas');
+  c.width = Math.ceil(rw * s);
+  c.height = Math.ceil(rh * s);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  const tf = region ? [1, 0, 0, 1, -region[0] * s, -region[1] * s] : null;
+  await page.render({ canvasContext: ctx, canvas: c, viewport: vp, transform: tf }).promise;
+  return { dataUrl: c.toDataURL('image/jpeg', 0.85), w: c.width, h: c.height, scale: s };
+}
+
+export async function pageSize(pageKey) {
+  const page = await getPage(pageKey);
+  const vp = page.getViewport({ scale: 1 });
+  return { w: vp.width, h: vp.height };
 }
 
 export async function showPage(pageKey) {

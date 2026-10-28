@@ -2,13 +2,14 @@
 import { store, commit, undo, redo, on, emit, uid, blankProject, resetHistory, markDirty, condition, nextColor } from './store.js';
 import * as viewer from './viewer.js';
 import { view } from './viewer.js';
-import { initOverlay, drawOverlay, drawSnapLayer, scaleFor, lengthLabel, areaLabel, lineFactor } from './overlay.js';
+import { initOverlay, drawOverlay, drawSnapLayer, setAux, scaleFor, lengthLabel, areaLabel, lineFactor } from './overlay.js';
 import { findSnap } from './snap.js';
+import { fillAt, clearFillCache } from './fill.js';
 import { markupPitch } from './geometry.js';
 import { initPanels, renderSheets, renderConditions, renderInspector, setSheetMode } from './panels.js';
 import { initEstimate, renderEstimate, estimateCsv } from './estimate.js';
 import { conditionDialog, calibrateDialog, scaleOptionsHtml, presetToScale, shortcutsDialog, aboutDialog, settingsDialog, TYPE_INFO } from './dialogs.js';
-import { SCALE_PRESETS } from './units.js';
+import { SCALE_PRESETS, pickSheetScale } from './units.js';
 import { $, $$, h, esc, toast, modal, contextMenu, closeContextMenu } from './dom.js';
 import { hydrateIcons, icon } from './icons.js';
 import { dist, distToSegment, pointInPolygon, orthoSnap } from './geometry.js';
@@ -65,9 +66,11 @@ const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
 let snapOn = pref('gridline-snap', 'on') !== 'off';
 let snapRadius = +pref('gridline-snap-radius', '10') || 10;
 let autoUpdate = pref('gridline-auto-update', 'on') !== 'off';
+let autoScale = pref('gridline-auto-scale', 'on') !== 'off';
+let fillGap = pref('gridline-fill-gap', 'small');
 let snapIndex = null; // line geometry of the current sheet
 let snapHit = null; // current snap target, shown as a marker
-const DRAW_TOOLS = ['linear', 'area', 'roof', 'count', 'measure', 'calibrate'];
+const DRAW_TOOLS = ['linear', 'area', 'roof', 'count', 'measure', 'calibrate', 'fill'];
 const TAKEOFF_TOOLS = ['linear', 'area', 'roof', 'count'];
 const SNAP_TOOLS = ['linear', 'area', 'roof', 'measure', 'calibrate'];
 const vpEl = $('#viewport');
@@ -80,6 +83,7 @@ const panelActions = {
   goToPage,
   removeDocument,
   copyScaleToAll,
+  detectScales,
   activateCondition,
   editCondition,
   duplicateCondition,
@@ -169,8 +173,9 @@ function toolHint() {
       pan: 'Drag to pan · wheel to zoom',
       linear: draft ? 'Click to add points · Enter / double-click to finish · Backspace undoes a point · Shift for 90°' : 'Click to start a linear run · Tab flips to Area',
       area: draft ? 'Click to add corners · Enter / double-click to close · hold Alt to finish as a deduction' : 'Click to start an area · Tab flips to Linear',
+      fill: 'Click inside a room to fill its area automatically · Alt+click for a deduction · uses the active area or roof condition',
       roof: draft ? 'Trace the roof outline in plan · Enter to close · hold Alt for a deduction (skylight, chimney)' : 'Trace a roof plane in plan view — pitch converts it to true roof area',
-      count: 'Click to place counts · Esc when done',
+      count: 'Click to place counts · drag a box around one symbol to find all matching ones',
       measure: 'Click two points to measure',
       calibrate: 'Click both ends of a known dimension',
     }[t] || ''
@@ -250,6 +255,41 @@ async function guessNames(docId, numPages) {
   }
   renderSheets();
   updateToolbar();
+  if (autoScale) {
+    const keys = Array.from({ length: numPages }, (_, i) => `${docId}:${i + 1}`);
+    detectScales(keys, false);
+  }
+}
+
+/**
+ * Read each sheet's scale from its title-block text. When `force`, overwrites existing
+ * scales; otherwise only fills unscaled sheets. Not undoable as a group with the import,
+ * but individual sheets can be changed afterwards.
+ */
+async function detectScales(keys, force = false) {
+  const found = {};
+  let ambiguous = 0;
+  for (const key of keys) {
+    const pg = store.project.pages[key];
+    if (!pg || (pg.scale && !force)) continue;
+    const { text } = await viewer.getPageText(key);
+    if (/\b(NTS|N\.T\.S\.|NOT TO SCALE)\b/i.test(text) && !/scale\s*:?\s*\d/i.test(text)) continue;
+    const r = pickSheetScale(text);
+    if (!r) continue;
+    if (r.ambiguous) ambiguous++;
+    const preset = SCALE_PRESETS.find((p) => Math.abs(presetToScale(p).ptPerUnit - r.scale.ptPerUnit) < 1e-6 && presetToScale(p).unit === r.scale.unit);
+    found[key] = { ...(preset ? presetToScale(preset) : r.scale), auto: true };
+  }
+  const n = Object.keys(found).length;
+  if (n) {
+    commit((p) => {
+      for (const [k, sc] of Object.entries(found)) if (p.pages[k]) p.pages[k].scale = sc;
+    }, 'pages');
+    toast(`Read the scale from the title block on ${n} of ${keys.length} sheet${keys.length === 1 ? '' : 's'}${ambiguous ? ` (${ambiguous} had more than one scale)` : ''}. Spot-check one with Measure.`, { kind: 'ok', timeout: 6000 });
+  } else if (force) {
+    toast("Couldn't find a scale in that sheet's text. Pick one or calibrate.", { kind: 'err' });
+  }
+  return n;
 }
 
 async function addPdfs() {
@@ -300,7 +340,7 @@ function closeCurrentDrawing() {
 async function openSettings() {
   const s = store.project.settings;
   const r = await settingsDialog({
-    app: { theme: themePref, snap: snapOn, snapRadius, sheetMode: store.ui.sheetMode, autoUpdate },
+    app: { theme: themePref, snap: snapOn, snapRadius, sheetMode: store.ui.sheetMode, autoUpdate, fillGap, autoScale },
     proj: { unit: store.project.unit, labelStyle: s.labelStyle, showLabels: s.showLabels, taxPct: s.taxPct, overheadPct: s.overheadPct, profitPct: s.profitPct },
     version: store.version,
     hasProject: true,
@@ -319,6 +359,10 @@ async function openSettings() {
   setPref('gridline-auto-update', autoUpdate ? 'on' : 'off');
   if (api.updater.setAuto) api.updater.setAuto(autoUpdate);
   if (r.app.sheetMode !== store.ui.sheetMode) setSheetMode(r.app.sheetMode);
+  fillGap = r.app.fillGap;
+  setPref('gridline-fill-gap', fillGap);
+  autoScale = r.app.autoScale;
+  setPref('gridline-auto-scale', autoScale ? 'on' : 'off');
   const { unit, ...rest } = r.proj;
   const changed = unit !== store.project.unit || Object.keys(rest).some((k) => s[k] !== rest[k]);
   if (changed)
@@ -409,6 +453,7 @@ async function removeDocument(docId) {
     if (r !== 0) return;
   }
   viewer.unloadDocument(docId);
+  clearFillCache(docId + ':');
   const p = store.project;
   p.documents = p.documents.filter((x) => x.id !== docId);
   for (const k of Object.keys(p.pages)) if (k.startsWith(docId + ':')) delete p.pages[k];
@@ -444,6 +489,10 @@ async function goToPage(key) {
   store.ui.selectedMarkupId = null;
   snapIndex = null;
   snapHit = null;
+  if (proposals && proposals.pageKey !== key) {
+    proposals = null;
+    showProposals();
+  }
   viewer.getSnapIndex(key).then((idx) => {
     if (store.ui.pageKey === key) snapIndex = idx;
   });
@@ -468,6 +517,10 @@ function stepPage(d) {
 $('#scaleSelect').addEventListener('change', (e) => {
   const v = e.target.value;
   if (v === 'calibrate') return setTool('calibrate');
+  if (v === 'detect') {
+    updateToolbar();
+    return detectScales([store.ui.pageKey], true);
+  }
   if (v === '' || v === 'cal') return updateToolbar();
   const preset = SCALE_PRESETS[+v];
   const key = store.ui.pageKey;
@@ -568,6 +621,25 @@ async function setTool(tool, fromCondition = false) {
   cancelDraft();
   snapHit = null;
   if (tool !== 'measure') measure = null;
+  if (tool === 'fill') {
+    const c = condition(store.ui.activeConditionId);
+    if (!c || (c.type !== 'area' && c.type !== 'roof')) {
+      const last = condition(store.ui.lastByType.area);
+      const any = last || [...store.project.conditions].reverse().find((x) => x.type === 'area');
+      if (any) {
+        store.ui.activeConditionId = any.id;
+        store.ui.lastByType.area = any.id;
+      } else {
+        const base = 'Area';
+        let n = 1;
+        while (store.project.conditions.some((x) => x.name === `${base} ${n}`)) n++;
+        const nc = { id: uid('cond'), name: `${base} ${n}`, type: 'area', color: nextColor(), group: '', height: 0, depth: 0, pitch: 0, roofLine: '', waste: 0, matCost: 0, laborCost: 0, costBasis: null, notes: '' };
+        commit((p) => p.conditions.push(nc), 'conditions');
+        store.ui.activeConditionId = nc.id;
+        store.ui.lastByType.area = nc.id;
+      }
+    }
+  }
   if (TAKEOFF_TOOLS.includes(tool) && !fromCondition) {
     const c = condition(store.ui.activeConditionId);
     if (!c || c.type !== tool) {
@@ -745,10 +817,16 @@ vpEl.addEventListener('pointerdown', (e) => {
   if (isDouble && (tool === 'linear' || tool === 'area' || tool === 'roof')) return;
 
   const c = condition(store.ui.activeConditionId);
+  if (tool === 'fill') {
+    if (!c) return;
+    return autoFill(p, e.altKey);
+  }
   if (tool === 'count') {
     if (!c) return;
-    const m = { id: uid('mk'), conditionId: c.id, pageKey: store.ui.pageKey, type: 'count', points: [p] };
-    commit((pp) => pp.markups.push(m), 'markups-live');
+    if (proposals && toggleProposalAt(p)) return;
+    // Click = place a count. Drag = box one symbol and find all the matching ones.
+    drag = { kind: 'box', start: viewer.toPage(e.clientX, e.clientY), cx: e.clientX, cy: e.clientY, moved: false };
+    vpEl.setPointerCapture(e.pointerId);
     return;
   }
   if (tool === 'measure') {
@@ -782,6 +860,14 @@ vpEl.addEventListener('pointerdown', (e) => {
 
 vpEl.addEventListener('pointermove', (e) => {
   if (drag) {
+    if (drag.kind === 'box') {
+      if (!drag.moved && Math.hypot(e.clientX - drag.cx, e.clientY - drag.cy) < 6) return;
+      drag.moved = true;
+      const q = viewer.toPage(e.clientX, e.clientY);
+      setAux({ box: [drag.start[0], drag.start[1], q[0], q[1]] });
+      drawSnapLayer(null);
+      return;
+    }
     if (drag.kind === 'pan') {
       viewer.panBy(e.clientX - drag.x, e.clientY - drag.y);
       drag.x = e.clientX;
@@ -845,6 +931,20 @@ vpEl.addEventListener('pointerup', (e) => {
   try {
     vpEl.releasePointerCapture(e.pointerId);
   } catch {}
+  if (d.kind === 'box') {
+    setAux({ box: null });
+    drawSnapLayer(null);
+    const c = condition(store.ui.activeConditionId);
+    if (!c) return;
+    if (!d.moved) {
+      const m = { id: uid('mk'), conditionId: c.id, pageKey: store.ui.pageKey, type: 'count', points: [d.start] };
+      commit((pp) => pp.markups.push(m), 'markups-live');
+      return;
+    }
+    const q = viewer.toPage(e.clientX, e.clientY);
+    findMatches(store.ui.pageKey, [Math.min(d.start[0], q[0]), Math.min(d.start[1], q[1]), Math.abs(q[0] - d.start[0]), Math.abs(q[1] - d.start[1])], c.id);
+    return;
+  }
   if ((d.kind === 'vertex' || d.kind === 'move') && d.moved) {
     const next = d.m.points.map((q) => [...q]);
     d.m.points = d.orig;
@@ -877,6 +977,157 @@ vpEl.addEventListener('contextmenu', (e) => {
   items.push({ label: 'Delete markup', icon: 'trash', danger: true, run: deleteSelected });
   contextMenu(e.clientX, e.clientY, items);
 });
+
+// ---------- Find matching symbols ----------
+let proposals = null; // { pageKey, conditionId, items: [{ p, score, off }], cutoff, color, radius }
+let matchWorker = null;
+let matchSeq = 0;
+
+function runMatchInWorker(payload) {
+  if (!matchWorker) matchWorker = new Worker(new URL('./match-worker.js', import.meta.url), { type: 'module' });
+  const id = ++matchSeq;
+  return new Promise((resolve, reject) => {
+    const onMsg = (e) => {
+      if (e.data.id !== id) return;
+      if (e.data.progress != null) return payload.onProgress && payload.onProgress(e.data.progress);
+      matchWorker.removeEventListener('message', onMsg);
+      e.data.error ? reject(new Error(e.data.error)) : resolve(e.data.result);
+    };
+    matchWorker.addEventListener('message', onMsg);
+    const { onProgress, ...msg } = payload;
+    matchWorker.postMessage({ id, ...msg }, [msg.img.buffer]);
+  });
+}
+
+/**
+ * Find symbols matching the one inside `rect` ([x, y, w, h] page points) on a sheet.
+ * Interactive by default (shows the review bar); with { auto: true } returns the matches.
+ */
+async function findMatches(pageKey, rect, conditionId, { auto = false, cutoff = 0.75 } = {}) {
+  const [rx, ry, rw, rh] = rect;
+  if (rw < 3 || rh < 3) return auto ? [] : toast('Drag a box around one symbol.');
+  const ps = await viewer.pageSize(pageKey);
+  // Resolution: aim for ~28 px across the symbol, but keep the sheet image under ~14 MP.
+  let r = 28 / Math.max(rw, rh);
+  r = Math.min(r, 3, Math.sqrt(14e6 / (ps.w * ps.h)));
+  r = Math.max(r, 0.5);
+  const t0 = performance.now();
+  const busy = auto ? null : toast('Looking for matching symbols…', { timeout: 0 });
+  try {
+    const g = await viewer.renderGray(pageKey, r);
+    const tx = Math.max(0, Math.round(rx * r)),
+      ty = Math.max(0, Math.round(ry * r));
+    const tw = Math.min(g.W - tx, Math.round(rw * r)),
+      th = Math.min(g.H - ty, Math.round(rh * r));
+    const t = new Uint8Array(tw * th);
+    for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) t[y * tw + x] = g.img[(ty + y) * g.W + tx + x];
+    const found = await runMatchInWorker({
+      img: g.img,
+      W: g.W,
+      H: g.H,
+      tpl: { t, w: tw, h: th },
+      opts: { minScore: 0.55, rotations: true },
+      onProgress: (p) => busy && (busy.querySelector('.msg').textContent = `Looking for matching symbols… ${Math.round(p * 100)}%`),
+    });
+    if (busy) busy.remove();
+    // Skip spots already counted for this condition.
+    const existing = store.project.markups.filter((m) => m.pageKey === pageKey && m.conditionId === conditionId && m.type === 'count').flatMap((m) => m.points);
+    const minD = Math.max(rw, rh) * 0.5;
+    const items = found
+      .map((f) => ({ p: [f.x / r, f.y / r], score: f.score }))
+      .filter((f) => !existing.some((q) => Math.hypot(q[0] - f.p[0], q[1] - f.p[1]) < minD));
+    console.info(`match: ${items.length} candidates in ${Math.round(performance.now() - t0)} ms @ ${r.toFixed(2)} px/pt`);
+    if (auto) return items.filter((i) => i.score >= cutoff);
+    const c = condition(conditionId);
+    proposals = { pageKey, conditionId, items, cutoff: +$('#matchSens').value, color: c ? c.color : '#ff8a24', radius: Math.max(rw, rh) / 2 };
+    showProposals();
+  } catch (err) {
+    if (busy) busy.remove();
+    console.error(err);
+    if (!auto) toast("Couldn't search this sheet.", { kind: 'err' });
+    return [];
+  }
+}
+
+function proposalsOn() {
+  return proposals ? proposals.items.filter((c) => c.score >= proposals.cutoff && !c.off) : [];
+}
+
+function showProposals() {
+  const bar = $('#matchBar');
+  if (!proposals) {
+    bar.hidden = true;
+    setAux({ proposals: null });
+    drawSnapLayer(snapHit);
+    return;
+  }
+  const n = proposalsOn().length;
+  $('#matchText').innerHTML = `<b>${n}</b> match${n === 1 ? '' : 'es'} · click a ring to skip it`;
+  $('#matchAccept').textContent = `Add ${n} count${n === 1 ? '' : 's'}`;
+  $('#matchAccept').disabled = !n;
+  bar.hidden = false;
+  setAux({ proposals });
+  drawSnapLayer(snapHit);
+}
+
+function toggleProposalAt(p) {
+  if (!proposals || proposals.pageKey !== store.ui.pageKey) return false;
+  const r = Math.max(9 / view.zoom, proposals.radius);
+  const hit = proposals.items.find((c) => c.score >= proposals.cutoff - 0.001 && Math.hypot(c.p[0] - p[0], c.p[1] - p[1]) <= r);
+  if (!hit) return false;
+  hit.off = !hit.off;
+  showProposals();
+  return true;
+}
+
+function acceptProposals() {
+  if (!proposals) return;
+  const on = proposalsOn();
+  const { pageKey, conditionId } = proposals;
+  proposals = null;
+  showProposals();
+  if (!on.length) return;
+  commit((p) => {
+    for (const c of on) p.markups.push({ id: uid('mk'), conditionId, pageKey, type: 'count', points: [c.p] });
+  }, 'markups-live');
+  toast(`Added ${on.length} counts`, { kind: 'ok', timeout: 2000 });
+}
+
+$('#matchSens').addEventListener('input', (e) => {
+  if (!proposals) return;
+  proposals.cutoff = +e.target.value;
+  showProposals();
+});
+$('#matchAccept').onclick = acceptProposals;
+$('#matchCancel').onclick = () => {
+  proposals = null;
+  showProposals();
+};
+
+async function autoFill(p, deduct = false, { quiet = false, pageKey = store.ui.pageKey, conditionId = store.ui.activeConditionId } = {}) {
+  const c = condition(conditionId);
+  if (!c || (c.type !== 'area' && c.type !== 'roof')) return { error: 'cond' };
+  vpEl.style.cursor = 'progress';
+  const idx = await viewer.getSnapIndex(pageKey);
+  const pg = await viewer.pageSize(pageKey);
+  const r = fillAt(pageKey, idx, pg.w, pg.h, p, fillGap);
+  vpEl.style.cursor = '';
+  if (r.error) {
+    if (!quiet) {
+      const msg = {
+        leak: "That space isn't closed — there's a gap in the walls (often a door opening with no swing drawn). Try Settings → Fill gap: Medium or Large, or trace it with SF.",
+        nolines: "This sheet has no vector linework (it's probably a scan), so Fill can't see the walls. Trace it with SF instead.",
+        online: 'Click inside the room, not on a wall.',
+      }[r.error];
+      toast(msg || "Couldn't fill there.", { kind: 'err', timeout: 6000 });
+    }
+    return r;
+  }
+  const m = { id: uid('mk'), conditionId: c.id, pageKey, type: c.type, points: r.points };
+  if (deduct) m.deduct = true;
+  if (!quiet) commit((pp) => pp.markups.push(m), 'markups-live');
+  return { markup: m };
+}
 
 function finishDraft(deduct = false) {
   if (!draft) return;
@@ -940,11 +1191,14 @@ document.addEventListener('keydown', (e) => {
   if (k === '[') return togglePanel('left');
   if (k === ']') return togglePanel('right');
   if (k === '\\') return togglePanel('both');
-  const tools = { v: 'select', h: 'pan', l: 'linear', a: 'area', r: 'roof', c: 'count', m: 'measure', k: 'calibrate' };
+  const tools = { v: 'select', h: 'pan', l: 'linear', a: 'area', r: 'roof', c: 'count', m: 'measure', k: 'calibrate', b: 'fill' };
   if (tools[k.toLowerCase()] && !e.altKey) return setTool(tools[k.toLowerCase()]);
   switch (k) {
     case 'Escape':
-      if (draft || measure) {
+      if (proposals) {
+        proposals = null;
+        showProposals();
+      } else if (draft || measure) {
         cancelDraft();
         measure = null;
         snapHit = null;
@@ -956,7 +1210,8 @@ document.addEventListener('keydown', (e) => {
       } else if (store.ui.tool !== 'select') setTool('select');
       break;
     case 'Enter':
-      if (draft) finishDraft(e.altKey);
+      if (proposals) acceptProposals();
+      else if (draft) finishDraft(e.altKey);
       break;
     case 'Backspace':
       if (draft) {

@@ -154,3 +154,23 @@ test('rake and hip lines use true sloped length', () => {
   close(conditionTotals({ id: 'l', type: 'linear', roofLine: 'hip', pitch: 12 }, run, scaleFor).length, 20 * Math.sqrt(1.5));
   close(conditionTotals({ id: 'l', type: 'linear' }, run, scaleFor).length, 20);
 });
+
+import { findScalesInText, pickSheetScale } from '../src/renderer/js/units.js';
+
+test('reads scales from title block text', () => {
+  const s = (t) => pickSheetScale(t)?.scale;
+  close(s(`FIRST FLOOR PLAN SCALE: 1/4" = 1'-0"`).ptPerUnit, 18);
+  assert.equal(s(`SCALE: 1/4" = 1'-0"`).label, `1/4" = 1'-0"`);
+  close(s(`SCALE 1/8"=1'-0"`).ptPerUnit, 9);
+  close(s(`SCALE: 3/16” = 1’-0”`).ptPerUnit, 13.5);
+  assert.equal(s(`DETAIL SCALE: 1 1/2" = 1'-0"`).label, `1-1/2" = 1'-0"`);
+  assert.equal(s(`SCALE: 1-1/2" = 1'-0"`).label, `1-1/2" = 1'-0"`);
+  close(s(`SITE PLAN SCALE: 1" = 20'-0"`).ptPerUnit, 3.6);
+  close(s(`SCALE: 1" = 40'`).ptPerUnit, 1.8);
+  assert.equal(s(`SCALE 1:100`).unit, 'm');
+  assert.equal(pickSheetScale('ROOF SLOPE 1:12 MIN'), null); // unlabeled ratio isn't a scale
+  assert.equal(pickSheetScale('SCALE: NTS'), null);
+  // A labeled title-block scale beats unlabeled detail callouts
+  close(s(`3/4" = 1'-0" 3/4" = 1'-0" SCALE: 1/8" = 1'-0"`).ptPerUnit, 9);
+  assert.equal(findScalesInText(`1/4" = 1'-0" and 1/2" = 1'-0"`).length, 2);
+});

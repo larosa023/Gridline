@@ -182,7 +182,8 @@ export function scaleOptionsHtml(current) {
   const groups = {};
   SCALE_PRESETS.forEach((p, i) => (groups[p.group] = groups[p.group] || []).push([p, i]));
   let html = `<option value="" ${!current ? 'selected' : ''}>Set scale…</option>`;
-  if (current && current.calibrated) html += `<option value="cal" selected>Calibrated</option>`;
+  const isPreset = current && !current.calibrated && SCALE_PRESETS.some((p) => p.label === current.label);
+  if (current && !isPreset) html += `<option value="cal" selected>${esc(current.calibrated ? 'Calibrated' : current.label)}</option>`;
   for (const [g, list] of Object.entries(groups)) {
     html += `<optgroup label="${g}">`;
     for (const [p, i] of list) {
@@ -191,6 +192,7 @@ export function scaleOptionsHtml(current) {
     }
     html += `</optgroup>`;
   }
+  html += `<option value="detect">Read from title block</option>`;
   html += `<option value="calibrate">Calibrate from drawing…</option>`;
   return html;
 }
@@ -204,7 +206,8 @@ export function shortcutsDialog() {
     ['Linear takeoff', 'L'],
     ['Area takeoff', 'A'],
     ['Roof takeoff (pitched)', 'R'],
-    ['Count takeoff', 'C'],
+    ['Count takeoff (drag a box = find matches)', 'C'],
+    ['Auto-fill a room', 'B'],
     ['Flip Linear ⇄ Area', 'Tab'],
     ['Snap to plan lines on/off', 'S'],
     ['Hide / show left panel', '['],
@@ -280,6 +283,8 @@ export function settingsDialog({ app, proj, version, hasProject, onCheckUpdates 
           <label class="setting-row"><span><b>Theme</b></span><select name="theme">${opt('dark', app.theme, 'Dark')}${opt('light', app.theme, 'Light')}${opt('system', app.theme, 'Match Windows')}</select></label>
           ${toggle('snap', app.snap, 'Snap to plan lines', 'Pull points onto wall corners and lines in the PDF. Hold Ctrl to place a free point.')}
           <label class="setting-row"><span><b>Snap strength</b><small>How close the cursor has to be before it grabs a line</small></span><select name="snapRadius">${opt('6', String(app.snapRadius), 'Light')}${opt('10', String(app.snapRadius), 'Normal')}${opt('16', String(app.snapRadius), 'Strong')}</select></label>
+          <label class="setting-row"><span><b>Fill gap tolerance</b><small>Bigger bridges small breaks in walls; too big can merge rooms</small></span><select name="fillGap">${opt('small', app.fillGap, 'Small')}${opt('medium', app.fillGap, 'Medium')}${opt('large', app.fillGap, 'Large')}</select></label>
+          ${toggle('autoScale', app.autoScale, 'Read scales from title blocks', 'When you add drawings, unscaled sheets get the scale printed on them.')}
           <label class="setting-row"><span><b>Sheet list</b><small>What the left panel shows for each PDF</small></span><select name="sheetMode">${opt('all', app.sheetMode, 'All pages')}${opt('current', app.sheetMode, 'Current page only')}</select></label>
           ${toggle('autoUpdate', app.autoUpdate, 'Check for updates automatically', 'Updates download in the background; you choose when to restart.')}
           <div class="setting-row"><span><b>Version</b><small>Gridline ${esc(version || '')}</small></span><button type="button" class="btn small" data-check>${icon('refresh', 14)} Check now</button></div>
@@ -311,6 +316,8 @@ export function settingsDialog({ app, proj, version, hasProject, onCheckUpdates 
           snapRadius: +f.get('snapRadius'),
           sheetMode: f.get('sheetMode'),
           autoUpdate: on('autoUpdate'),
+          fillGap: f.get('fillGap'),
+          autoScale: on('autoScale'),
         },
         proj: {
           unit: f.get('unit'),

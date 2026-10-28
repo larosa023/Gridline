@@ -18,6 +18,10 @@
 - **Settings** (gear icon, `Ctrl+,`) — theme (dark / light / match Windows), snap on/off and strength, sheet list mode, automatic updates, and per-project units, length display (ft-in or decimal), on-plan labels and estimate markups. Project settings can be saved as defaults for new projects.
 - **Scale** — architectural, engineering and metric presets, or **calibrate** from any known dimension. Apply one scale to a whole set.
 - **Quick LF / SF toggles** — one click on **LF** or **SF** (or `Tab` to flip between them) and you're measuring; no condition setup required. Each toggle remembers the last condition you used with it, and its ▾ menu switches conditions.
+- **Smart tools (free, offline)**
+  - **Auto-scale** — when you add drawings, each sheet's scale is read from its title block (`SCALE: 1/4" = 1'-0"`, `1" = 20'`, `1:100`). Auto scales are tagged *auto* so you can spot-check them; also available from the scale menu and a sheet's right-click menu.
+  - **Fill (`B`)** — click inside a room and its floor area is traced from the wall lines, corners snapped exactly. Alt+click makes a deduction. Furniture inside the room is ignored; if walls have a gap (a door opening with no swing), Gridline tells you instead of guessing. Gap tolerance is in Settings.
+  - **Find matching symbols** — with the Count tool, drag a box around one symbol and Gridline finds every match on the sheet, including rotated ones. Review them (click a ring to skip it, slide for fewer/more) and press **Add**.
 - **Snap to plan lines** — Gridline reads the vector linework in the PDF and snaps to wall corners (□), line crossings (×) and anywhere along a line (◇), plus your existing markup points. `S` toggles it; hold `Ctrl` to place a free point.
 - **Takeoff tools**
   - **Linear** — walls, curbs, pipe, trim. Optional height gives wall SF. Set a roof line type (rake or hip/valley) plus pitch to get true sloped length.
@@ -49,6 +53,7 @@ Download **[Gridline-Setup.exe](https://github.com/larosa023/Gridline/releases/l
 | Roof | `R` | Flip Linear ⇄ Area | `Tab` |
 | Count | `C` | Prev / next sheet | `PgUp` / `PgDn` |
 | Snap on/off | `S` | Free point (no snap) | hold `Ctrl` |
+| Fill room | `B` | Find matches | Count tool, drag a box |
 | Measure | `M` | Undo / redo | `Ctrl+Z` / `Ctrl+Y` |
 | Calibrate | `K` | Takeoff / Estimate | `Ctrl+1` / `Ctrl+2` |
 

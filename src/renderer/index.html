@@ -65,8 +65,9 @@
             <button class="tool qt" data-tool="area" title="Square feet (A) — one click, no setup" data-icon="area"><b>SF</b><span>Area</span></button>
             <button class="tool qt-pick" data-pick="area" title="Choose area condition" data-icon="caret" data-size="14"></button>
           </div>
+          <button class="tool" data-tool="fill" title="Auto-fill a room: click inside it (B) — Alt+click to deduct" data-icon="bucket"><span>Fill</span></button>
           <button class="tool" data-tool="roof" title="Roof takeoff with pitch (R)" data-icon="roof"><span>Roof</span></button>
-          <button class="tool" data-tool="count" title="Count takeoff (C)" data-icon="count"><span>Count</span></button>
+          <button class="tool" data-tool="count" title="Count (C) — click to place, or drag a box around one symbol to find all matches" data-icon="count"><span>Count</span></button>
           <span class="tool-sep"></span>
           <button class="tool" data-tool="measure" title="Quick measure (M)" data-icon="measure"></button>
           <button class="tool snap-btn" id="btnSnap" title="Snap to plan lines (S) — hold Ctrl to bypass" data-icon="magnet"><span>Snap</span></button>
@@ -94,6 +95,12 @@
           <svg id="snapLayer" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
         <div class="hud" id="hud" hidden></div>
+        <div class="banner match-bar" id="matchBar" hidden>
+          <span id="matchText"></span>
+          <label class="muted small match-sens">Fewer<input type="range" id="matchSens" min="0.55" max="0.95" step="0.01" value="0.75" />More</label>
+          <button class="btn small primary" id="matchAccept">Add</button>
+          <button class="btn small ghost" id="matchCancel">Cancel</button>
+        </div>
         <div class="banner" id="scaleBanner" hidden>
           <span>This sheet has no scale.</span>
           <button class="btn small" id="bannerCalibrate">Calibrate</button>
