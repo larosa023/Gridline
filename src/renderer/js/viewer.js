@@ -163,7 +163,7 @@ export async function renderGray(pageKey, r) {
 }
 
 /** Render a sheet (or a region of it, in page points) to a JPEG data URL, longest side `max` px. */
-export async function renderJpeg(pageKey, max = 1600, region = null) {
+export async function renderJpeg(pageKey, max = 1600, region = null, draw = null) {
   const page = await getPage(pageKey);
   const base = page.getViewport({ scale: 1 });
   const rw = region ? region[2] : base.width;
@@ -178,6 +178,13 @@ export async function renderJpeg(pageKey, max = 1600, region = null) {
   ctx.fillRect(0, 0, c.width, c.height);
   const tf = region ? [1, 0, 0, 1, -region[0] * s, -region[1] * s] : null;
   await page.render({ canvasContext: ctx, canvas: c, viewport: vp, transform: tf }).promise;
+  if (draw) {
+    // Callers draw in page points; map them into this image.
+    ctx.save();
+    ctx.setTransform(s, 0, 0, s, region ? -region[0] * s : 0, region ? -region[1] * s : 0);
+    draw(ctx, s);
+    ctx.restore();
+  }
   return { dataUrl: c.toDataURL('image/jpeg', 0.85), w: c.width, h: c.height, scale: s };
 }
 

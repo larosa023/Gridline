@@ -2015,3 +2015,14 @@ kbd {
   width: auto;
   justify-self: start;
 }
+
+table.est tr.detail td {
+  padding-top: 3px;
+  padding-bottom: 3px;
+  font-size: 12px;
+  color: var(--text-2);
+  border-bottom: 1px dashed var(--border);
+}
+table.est tr.detail .detail-where {
+  padding-left: 18px;
+}

@@ -2,7 +2,8 @@
 import { store, commit } from './store.js';
 import { $, h, esc } from './dom.js';
 import { icon } from './icons.js';
-import { priceLine, estimateSummary, costBasisOptions, basisLabel, basisUnit } from './geometry.js';
+import { priceLine, estimateSummary, costBasisOptions, basisLabel, basisUnit, markupQuantities } from './geometry.js';
+import { scaleFor } from './overlay.js';
 import { fmtNum, fmtMoney } from './units.js';
 import { totalsFor } from './panels.js';
 import { TYPE_INFO } from './dialogs.js';
@@ -12,12 +13,49 @@ export function initEstimate(a) {
   actions = a;
 }
 
+/** Quantity of one markup in its condition's main unit (LF, SF, roof SF, EA). */
+export function markupQty(m, c) {
+  const q = markupQuantities(m, scaleFor(m.pageKey), c);
+  if (q.unscaled) return null;
+  if (c.type === 'linear') return q.length;
+  if (c.type === 'count') return q.count;
+  return q.area;
+}
+
+/** Takeoff detail for a condition, grouped by sheet and label. */
+export function breakdown(c) {
+  const p = store.project;
+  const rows = new Map();
+  for (const m of p.markups) {
+    if (m.conditionId !== c.id) continue;
+    const pg = p.pages[m.pageKey];
+    const key = `${m.pageKey}|${m.label || ''}`;
+    let r = rows.get(key);
+    if (!r) rows.set(key, (r = { sheet: pg ? pg.name : '?', label: m.label || '', qty: 0, n: 0, unscaled: 0 }));
+    const v = markupQty(m, c);
+    r.n++;
+    if (v == null) r.unscaled++;
+    else r.qty += v;
+  }
+  return [...rows.values()].sort((a, b) => a.sheet.localeCompare(b.sheet, undefined, { numeric: true }) || a.label.localeCompare(b.label, undefined, { numeric: true }));
+}
+
+const mainUnit = (c, unit) => (c.type === 'linear' ? (unit === 'm' ? 'm' : 'LF') : c.type === 'count' ? 'EA' : unit === 'm' ? 'm²' : 'SF');
+
 export function computeLines() {
   return store.project.conditions.map((c) => {
     const t = totalsFor(c);
     return { c, t, ...priceLine({ ...c, unit: store.project.unit }, t) };
   });
 }
+
+let showDetail = (() => {
+  try {
+    return localStorage.getItem('gridline-est-detail') === 'on';
+  } catch {
+    return false;
+  }
+})();
 
 export function renderEstimate() {
   const el = $('#estimateView');
@@ -56,6 +94,12 @@ export function renderEstimate() {
         <td class="num">${fmtMoney(l.mat)}<br/><span class="muted small">${fmtMoney(l.lab)} labor</span></td>
         <td class="num"><b>${fmtMoney(l.total)}</b></td>
       </tr>`;
+      if (showDetail) {
+        for (const b of breakdown(c)) {
+          rows += `<tr class="detail"><td colspan="3"><span class="detail-where">${esc(b.sheet)}${b.label ? ` · ${esc(b.label)}` : ''}</span> <span class="muted small">${b.n} markup${b.n === 1 ? '' : 's'}</span></td>
+            <td class="num">${b.unscaled ? '<span class="muted small">unscaled</span> ' : ''}${fmtNum(b.qty, 2)} <span class="muted small">${mainUnit(c, p.unit)}</span></td><td colspan="6"></td></tr>`;
+        }
+      }
     }
   }
 
@@ -65,6 +109,7 @@ export function renderEstimate() {
       <div class="spacer"></div>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><span>Units</span>
         <select id="unitSelect" style="width:auto"><option value="ft" ${p.unit === 'ft' ? 'selected' : ''}>Imperial (ft)</option><option value="m" ${p.unit === 'm' ? 'selected' : ''}>Metric (m)</option></select></label>
+      <label class="field" style="flex-direction:row;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="estDetail" ${showDetail ? 'checked' : ''} style="width:auto;height:auto" /><span>Breakdown by sheet &amp; view</span></label>
       <button class="btn" id="btnExportCsv">${icon('download', 16)} Export CSV</button>
     </div>
     <div class="est-layout">
@@ -110,6 +155,13 @@ export function renderEstimate() {
     inp.addEventListener('keydown', (e) => e.stopPropagation());
   });
   $('#unitSelect', el).onchange = (e) => actions.setUnit(e.target.value);
+  $('#estDetail', el).onchange = (e) => {
+    showDetail = e.target.checked;
+    try {
+      localStorage.setItem('gridline-est-detail', showDetail ? 'on' : 'off');
+    } catch {}
+    renderEstimate();
+  };
   $('#btnExportCsv', el).onclick = () => actions.exportCsv();
 }
 
@@ -148,5 +200,11 @@ export function estimateCsv() {
   rows.push(['', `Overhead (${p.settings.overheadPct}%)`, '', '', '', '', '', '', '', '', '', '', r2(sum.overhead)]);
   rows.push(['', `Profit (${p.settings.profitPct}%)`, '', '', '', '', '', '', '', '', '', '', r2(sum.profit)]);
   rows.push(['', 'Bid total', '', '', '', '', '', '', '', '', '', '', r2(sum.total)]);
+  rows.push([]);
+  rows.push(['TAKEOFF DETAIL']);
+  rows.push(['Group', 'Condition', 'Sheet', 'Label / view', 'Markups', 'Quantity', 'Unit']);
+  for (const l of lines) {
+    for (const b of breakdown(l.c)) rows.push([l.c.group || '', l.c.name, b.sheet, b.label, b.n, b.unscaled === b.n ? '' : r2(b.qty), mainUnit(l.c, p.unit)]);
+  }
   return rows.map((r) => r.map(q).join(',')).join('\r\n');
 }

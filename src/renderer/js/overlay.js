@@ -1,7 +1,7 @@
 // Draws markups, the in-progress shape and labels into the SVG overlay.
 import { store, condition } from './store.js';
 import { view } from './viewer.js';
-import { centroid, midpointOfPolyline, polygonArea, polylineLength, polygonPerimeter, markupPitch } from './geometry.js';
+import { centroid, midpointOfPolyline, polygonArea, polylineLength, polygonPerimeter, markupPitch, pointInPolygon } from './geometry.js';
 import { fmtLength, fmtNum, UNIT_LABELS, slopeFactor, hipFactor, formatPitch } from './units.js';
 import { esc } from './dom.js';
 
@@ -113,8 +113,33 @@ export function drawOverlay(draft = null, measure = null, snap = null) {
       out += `<polygon class="mk" data-id="${m.id}" points="${pts}" fill="${fill}" fill-opacity="${m.deduct || roof ? 1 : isSel ? 0.42 : 0.28}" stroke="${color}" stroke-width="${isSel ? 3 : 2}" vector-effect="non-scaling-stroke" stroke-linejoin="round" ${m.deduct ? 'stroke-dasharray="6 4"' : ''}/>`;
       if (roof && c) roofPatterns.set(c.id, color);
       if (showLabels) {
-        const [cx, cy] = centroid(m.points);
-        labels += label(cx, cy, (m.deduct ? '− ' : '') + areaLabel(m.points, m.pageKey, roof ? markupPitch(m, c) : null), color, fs, z);
+        // Only label shapes big enough on screen to hold the text.
+        let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+        for (const [x, y] of m.points) {
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+        const wpx = (x1 - x0) * z, hpx = (y1 - y0) * z;
+        let qty = (m.deduct ? '− ' : '') + areaLabel(m.points, m.pageKey, roof ? markupPitch(m, c) : null);
+        if (!m.deduct) {
+          // A zone with openings deducted inside it shows its net area.
+          const holes = store.project.markups.filter((d) => d.deduct && d.conditionId === m.conditionId && d.pageKey === m.pageKey && pointInPolygon(centroid(d.points), m.points));
+          const sc = scaleFor(m.pageKey);
+          if (holes.length && sc) {
+            const k2 = sc.ptPerUnit * sc.ptPerUnit;
+            let net = polygonArea(m.points) - holes.reduce((a, d) => a + polygonArea(d.points), 0);
+            if (roof) net *= slopeFactor(markupPitch(m, c));
+            qty = `${fmtNum(net / k2, 1)} ${UNIT_LABELS[store.project.unit].area} net`;
+          }
+        }
+        const text = m.label && !m.deduct ? `${m.label}: ${qty}` : qty;
+        const need = text.length * 6.5;
+        if (hpx >= 14 && wpx >= Math.min(need, 70)) {
+          const [cx, cy] = centroid(m.points);
+          labels += label(cx, cy, wpx >= need ? text : qty, color, fs, z);
+        }
       }
     } else if (m.type === 'linear') {
       out += `<polyline class="mk" data-id="${m.id}" points="${pts}" fill="none" stroke="transparent" stroke-width="14" vector-effect="non-scaling-stroke"/>`;

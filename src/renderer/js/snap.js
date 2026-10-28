@@ -9,11 +9,15 @@ const MIN_LEN = 0.6; // ignore specks / zero-length dashes
 export class SnapIndex {
   constructor() {
     this.seg = new Float32Array(4096 * 4);
+    // Per-segment drawing attributes, used to tell outlines from hatching:
+    this.width = new Float32Array(4096); // stroke width in page points (0 = hairline)
+    this.lum = new Uint8Array(4096); // stroke darkness 0 (black) .. 255 (white)
+    this.kind = new Uint8Array(4096); // 1 = stroked line, 2 = edge of a filled shape
     this.n = 0;
     this.grid = new Map();
   }
 
-  add(x1, y1, x2, y2) {
+  add(x1, y1, x2, y2, width = 0.5, lum = 0, kind = 1) {
     if (this.n >= MAX_SEGMENTS) return;
     const dx = x2 - x1;
     const dy = y2 - y1;
@@ -22,9 +26,21 @@ export class SnapIndex {
       const g = new Float32Array(this.seg.length * 2);
       g.set(this.seg);
       this.seg = g;
+      const w = new Float32Array(this.width.length * 2);
+      w.set(this.width);
+      this.width = w;
+      const l = new Uint8Array(this.lum.length * 2);
+      l.set(this.lum);
+      this.lum = l;
+      const k = new Uint8Array(this.kind.length * 2);
+      k.set(this.kind);
+      this.kind = k;
     }
     const i = this.n++;
     this.seg.set([x1, y1, x2, y2], i * 4);
+    this.width[i] = width;
+    this.lum[i] = lum;
+    this.kind[i] = kind;
     // Walk the segment through grid cells (handles long diagonals without huge bboxes).
     const len = Math.hypot(dx, dy);
     const steps = Math.max(1, Math.ceil(len / (CELL / 2)));
@@ -79,38 +95,60 @@ const mul = (m, n) => [
  * Build a SnapIndex from a page's drawing operators.
  * `OPS` is pdfjs.OPS; `viewportTransform` maps PDF space to viewer space at scale 1.
  */
+function colorLum(c) {
+  if (typeof c === 'string' && /^#[0-9a-f]{6}/i.test(c)) {
+    const n = parseInt(c.slice(1, 7), 16);
+    return Math.round(0.3 * ((n >> 16) & 255) + 0.59 * ((n >> 8) & 255) + 0.11 * (n & 255));
+  }
+  if (Array.isArray(c) || ArrayBuffer.isView(c)) {
+    const [r, g, b] = c;
+    const scale = Math.max(r, g, b) <= 1 ? 255 : 1;
+    return Math.round((0.3 * r + 0.59 * g + 0.11 * b) * scale);
+  }
+  return 0;
+}
+
 export async function buildSnapIndex(page, OPS, viewportTransform) {
   const list = await page.getOperatorList();
   const idx = new SnapIndex();
   const { fnArray, argsArray } = list;
-  let ctm = viewportTransform.slice();
+  // Graphics state we care about: transform, line width, stroke/fill darkness.
+  let gs = { ctm: viewportTransform.slice(), lw: 1, slum: 0, flum: 0 };
   const stack = [];
 
-  const tx = (x, y) => [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]];
+  const tx = (x, y) => [gs.ctm[0] * x + gs.ctm[2] * y + gs.ctm[4], gs.ctm[1] * x + gs.ctm[3] * y + gs.ctm[5]];
+  const scaleOf = (m) => Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2]));
 
   for (let i = 0; i < fnArray.length; i++) {
     const fn = fnArray[i];
     const args = argsArray[i];
-    if (fn === OPS.save) stack.push(ctm);
-    else if (fn === OPS.restore) ctm = stack.pop() || ctm;
-    else if (fn === OPS.transform) ctm = mul(ctm, args);
+    if (fn === OPS.save) stack.push({ ...gs });
+    else if (fn === OPS.restore) gs = stack.pop() || gs;
+    else if (fn === OPS.transform) gs.ctm = mul(gs.ctm, args);
+    else if (fn === OPS.setLineWidth) gs.lw = +args[0] || 0;
+    else if (fn === OPS.setGState && args && Array.isArray(args[0])) {
+      for (const [k, v] of args[0]) if (k === 'LW') gs.lw = +v || 0;
+    } else if (fn === OPS.setStrokeRGBColor || fn === OPS.setStrokeGray || fn === OPS.setStrokeColor || fn === OPS.setStrokeColorN) gs.slum = colorLum(args && args.length === 1 ? args[0] : args);
+    else if (fn === OPS.setFillRGBColor || fn === OPS.setFillGray || fn === OPS.setFillColor || fn === OPS.setFillColorN) gs.flum = colorLum(args && args.length === 1 ? args[0] : args);
     else if (fn === OPS.paintFormXObjectBegin) {
-      stack.push(ctm);
-      if (args && args[0]) ctm = mul(ctm, args[0]);
-    } else if (fn === OPS.paintFormXObjectEnd) ctm = stack.pop() || ctm;
+      stack.push({ ...gs });
+      if (args && args[0]) gs.ctm = mul(gs.ctm, args[0]);
+    } else if (fn === OPS.paintFormXObjectEnd) gs = stack.pop() || gs;
     else if (fn === OPS.constructPath) {
       const paintOp = args[0];
       if (paintOp === OPS.endPath) continue; // clipping paths aren't visible lines
       const data = args[1] && args[1][0];
       if (!data || typeof data.length !== 'number') continue;
-      addPathData(idx, data, tx);
+      const stroked = [OPS.stroke, OPS.closeStroke, OPS.fillStroke, OPS.eoFillStroke, OPS.closeFillStroke, OPS.closeEOFillStroke].includes(paintOp);
+      const width = stroked ? gs.lw * scaleOf(gs.ctm) : 0;
+      addPathData(idx, data, tx, width, stroked ? gs.slum : gs.flum, stroked ? 1 : 2);
       if (idx.n >= MAX_SEGMENTS) break;
     }
   }
   return idx;
 }
 
-function addPathData(idx, d, tx) {
+function addPathData(idx, d, tx, width, lum, kind) {
   let cur = null;
   let start = null;
   for (let i = 0; i < d.length; ) {
@@ -122,7 +160,7 @@ function addPathData(idx, d, tx) {
       case 1: {
         // lineTo
         const p = tx(d[i++], d[i++]);
-        if (cur) idx.add(cur[0], cur[1], p[0], p[1]);
+        if (cur) idx.add(cur[0], cur[1], p[0], p[1], width, lum, kind);
         cur = p;
         break;
       }
@@ -131,19 +169,19 @@ function addPathData(idx, d, tx) {
         const c1 = tx(d[i++], d[i++]);
         const c2 = tx(d[i++], d[i++]);
         const p = tx(d[i++], d[i++]);
-        if (cur) bezierChords(idx, cur, c1, c2, p);
+        if (cur) bezierChords(idx, cur, c1, c2, p, width, lum, kind);
         cur = p;
         break;
       }
       case 3: {
         const c = tx(d[i++], d[i++]);
         const p = tx(d[i++], d[i++]);
-        if (cur) bezierChords(idx, cur, c, c, p);
+        if (cur) bezierChords(idx, cur, c, c, p, width, lum, kind);
         cur = p;
         break;
       }
       case 4: // closePath
-        if (cur && start) idx.add(cur[0], cur[1], start[0], start[1]);
+        if (cur && start) idx.add(cur[0], cur[1], start[0], start[1], width, lum, kind);
         cur = start;
         break;
       default:
@@ -152,7 +190,7 @@ function addPathData(idx, d, tx) {
   }
 }
 
-function bezierChords(idx, a, b, c, d) {
+function bezierChords(idx, a, b, c, d, width, lum, kind) {
   const N = 6;
   let prev = a;
   for (let k = 1; k <= N; k++) {
@@ -162,7 +200,7 @@ function bezierChords(idx, a, b, c, d) {
       u * u * u * a[0] + 3 * u * u * t * b[0] + 3 * u * t * t * c[0] + t * t * t * d[0],
       u * u * u * a[1] + 3 * u * u * t * b[1] + 3 * u * t * t * c[1] + t * t * t * d[1],
     ];
-    idx.add(prev[0], prev[1], p[0], p[1]);
+    idx.add(prev[0], prev[1], p[0], p[1], width, lum, kind);
     prev = p;
   }
 }

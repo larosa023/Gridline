@@ -10,6 +10,9 @@ import { totalsFor, primaryQty } from './panels.js';
 import { computeLines } from './estimate.js';
 import { estimateSummary } from './geometry.js';
 import { scaleFor } from './overlay.js';
+import { findRegions, regionOutline, regionsLike } from './regions.js';
+import { detectViews, titleBlockLeft } from './views.js';
+import { pointInPolygon } from './geometry.js';
 
 export const RECOMMENDED_MODEL = 'qwen3.8:27b';
 export const RECOMMENDED_LABEL = 'Qwen 3.8 27B';
@@ -26,6 +29,8 @@ const state = {
   reqId: 0,
   pull: null, // { id, model, pct, status }
   debug: [], // what the model did, for troubleshooting (Copy log)
+  regionLists: new Map(), // find_regions token -> region list
+  viewCache: new Map(), // pageKey -> views
 };
 
 const pref = (k, d) => {
@@ -135,6 +140,34 @@ function summarizeCondition(c) {
   return o;
 }
 
+async function viewsFor(key) {
+  if (state.viewCache.has(key)) return state.viewCache.get(key);
+  const [{ items }, sz, idx] = await Promise.all([viewer.getPageText(key), viewer.pageSize(key), viewer.getSnapIndex(key)]);
+  const v = detectViews(items, sz.w, sz.h, titleBlockLeft(idx, sz.w, sz.h));
+  state.viewCache.set(key, v);
+  return v;
+}
+
+async function resolveArea(key, args) {
+  if (Array.isArray(args.box) && args.box.length === 4) return { box: args.box.map(Number), name: null };
+  if (args.view != null && args.view !== '') {
+    const vs = await viewsFor(key);
+    const q = String(args.view).toLowerCase();
+    const v = vs.find((x) => x.number && x.number.toLowerCase() === q) || vs.find((x) => x.title.toLowerCase().includes(q));
+    if (!v) throw new Error(`No view "${args.view}" on this sheet. Views: ${vs.map((x) => `${x.number || '?'} ${x.title}`).join('; ') || 'none found'}`);
+    return { box: v.box, name: `${v.number ? v.number + ' – ' : ''}${v.title}` };
+  }
+  const sz = await viewer.pageSize(key);
+  return { box: [0, 0, sz.w, sz.h], name: null };
+}
+
+function addMarkups(list) {
+  if (!list.length) return;
+  commit((pp) => list.forEach((m) => pp.markups.push(m)), 'markups');
+}
+
+const LABEL_PROP = { label: { type: 'string', description: 'Where this is, e.g. "Elev 1 – Front" or "Unit 2B". Shown in the estimate breakdown.' } };
+
 const TOOL_DEFS = [
   {
     name: 'get_overview',
@@ -223,6 +256,7 @@ const TOOL_DEFS = [
         condition: { type: 'string', description: 'Area or roof condition name' },
         rooms: { type: 'array', items: { type: 'string' } },
         points: { type: 'array', items: { type: 'array', items: { type: 'number' } } },
+        ...LABEL_PROP,
       },
       required: ['sheet', 'condition'],
     },
@@ -230,21 +264,71 @@ const TOOL_DEFS = [
   {
     name: 'count_text',
     description: 'Place a count at every place a tag or label appears on a sheet (door tags, fixture tags, keynotes).',
-    parameters: { type: 'object', properties: { sheet: { type: 'string' }, condition: { type: 'string' }, text: { type: 'string' }, whole_word: { type: 'boolean' } }, required: ['sheet', 'condition', 'text'] },
+    parameters: { type: 'object', properties: { sheet: { type: 'string' }, condition: { type: 'string' }, text: { type: 'string' }, whole_word: { type: 'boolean' }, ...LABEL_PROP }, required: ['sheet', 'condition', 'text'] },
   },
   {
     name: 'count_symbols',
     description: 'Find every symbol matching the one inside a box and count them. box is [x, y, width, height] in page points tightly around one example symbol.',
-    parameters: { type: 'object', properties: { sheet: { type: 'string' }, condition: { type: 'string' }, box: { type: 'array', items: { type: 'number' } } }, required: ['sheet', 'condition', 'box'] },
+    parameters: { type: 'object', properties: { sheet: { type: 'string' }, condition: { type: 'string' }, box: { type: 'array', items: { type: 'number' } }, ...LABEL_PROP }, required: ['sheet', 'condition', 'box'] },
   },
   {
     name: 'draw_markup',
     description: 'Draw a takeoff shape from page-point coordinates: a run of points for linear, a closed outline for area/roof, or points for count.',
     parameters: {
       type: 'object',
-      properties: { sheet: { type: 'string' }, condition: { type: 'string' }, points: { type: 'array', items: { type: 'array', items: { type: 'number' } } } },
+      properties: { sheet: { type: 'string' }, condition: { type: 'string' }, points: { type: 'array', items: { type: 'array', items: { type: 'number' } } }, deduct: { type: 'boolean' }, ...LABEL_PROP },
       required: ['sheet', 'condition', 'points'],
     },
+  },
+  {
+    name: 'list_views',
+    description: 'List the drawing views on a sheet (elevations, plans, sections, details) with their number, title, scale and approximate box in page points.',
+    parameters: { type: 'object', properties: { sheet: { type: 'string' } }, required: ['sheet'] },
+  },
+  {
+    name: 'find_regions',
+    description:
+      'Find every closed zone inside a view (or box) using the drawing linework, ignoring hatch patterns. Returns zones with exact area (SF), box, centre, hatch description, and any tags/text inside. Use this to measure facades, panels, rooms and any closed shapes accurately instead of drawing by eye.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sheet: { type: 'string' },
+        view: { type: 'string', description: 'View number or title from list_views (optional)' },
+        box: { type: 'array', items: { type: 'number' }, description: '[x, y, width, height] page points (optional, instead of view)' },
+        min_sf: { type: 'number', description: 'Ignore zones smaller than this (default 4)' },
+        include_hatch_lines: { type: 'boolean', description: 'true = treat hatch lines as boundaries too (rarely needed)' },
+      },
+      required: ['sheet'],
+    },
+  },
+  {
+    name: 'measure_regions',
+    description: 'Add exact area takeoffs for zones from find_regions. Openings inside each zone (windows, doors, louvers) are deducted automatically unless deduct_openings is false.',
+    parameters: {
+      type: 'object',
+      properties: {
+        condition: { type: 'string' },
+        regions: { type: 'array', items: { type: 'string' }, description: 'Zone ids from find_regions, e.g. ["R2.14", "R2.20"]' },
+        deduct_openings: { type: 'boolean' },
+        ...LABEL_PROP,
+      },
+      required: ['condition', 'regions'],
+    },
+  },
+  {
+    name: 'measure_similar',
+    description: 'Measure every zone in the same find_regions result that has the same hatch pattern as the given zone (e.g. all brick zones on an elevation). Skips zones already measured.',
+    parameters: {
+      type: 'object',
+      properties: { condition: { type: 'string' }, region: { type: 'string', description: 'An example zone id' }, deduct_openings: { type: 'boolean' }, ...LABEL_PROP },
+      required: ['condition', 'region'],
+    },
+  },
+  {
+    name: 'review_markups',
+    description: 'See the sheet (or a view/box) with all takeoff markups drawn on it in their condition colours, plus a list of possible problems (overlaps, unlabeled, unscaled). Use it to check your work and fix gaps or double counts.',
+    parameters: { type: 'object', properties: { sheet: { type: 'string' }, view: { type: 'string' }, box: { type: 'array', items: { type: 'number' } } }, required: ['sheet'] },
+    vision: true,
   },
   {
     name: 'get_estimate',
@@ -433,6 +517,8 @@ async function runTool(name, args, out) {
           results.push({ room: s.label, result: 'already measured' });
           continue;
         }
+        if (args.label) r.markup.label = String(args.label);
+        else if (s.label && !/^point /.test(s.label)) r.markup.label = s.label;
         made.push(r.markup);
         results.push({ room: s.label, sf: +(a / (k * k)).toFixed(1) });
       }
@@ -455,7 +541,7 @@ async function runTool(name, args, out) {
       const existing = p.markups.filter((m) => m.pageKey === key && m.conditionId === c.id).flatMap((m) => m.points);
       const pts = hits.map(textCenter).filter((pt) => !existing.some((e) => Math.hypot(e[0] - pt[0], e[1] - pt[1]) < 4));
       if (pts.length) {
-        commit((pp) => pts.forEach((pt) => pp.markups.push({ id: uid('mk'), conditionId: c.id, pageKey: key, type: 'count', points: [pt] })), 'markups');
+        commit((pp) => pts.forEach((pt) => pp.markups.push({ id: uid('mk'), conditionId: c.id, pageKey: key, type: 'count', points: [pt], ...(args.label ? { label: String(args.label) } : {}) })), 'markups');
         out.changed = true;
         if (store.ui.pageKey !== key) await ctx.goToPage(key);
       }
@@ -468,7 +554,7 @@ async function runTool(name, args, out) {
       if (b.length !== 4 || b.some((v) => !isFinite(v))) throw new Error('box must be [x, y, width, height] in page points');
       const found = await ctx.findMatches(key, b, c.id, { auto: true, cutoff: 0.75 });
       if (found.length) {
-        commit((pp) => found.forEach((f) => pp.markups.push({ id: uid('mk'), conditionId: c.id, pageKey: key, type: 'count', points: [f.p] })), 'markups');
+        commit((pp) => found.forEach((f) => pp.markups.push({ id: uid('mk'), conditionId: c.id, pageKey: key, type: 'count', points: [f.p], ...(args.label ? { label: String(args.label) } : {}) })), 'markups');
         out.changed = true;
         if (store.ui.pageKey !== key) await ctx.goToPage(key);
       }
@@ -480,10 +566,152 @@ async function runTool(name, args, out) {
       const pts = (args.points || []).map((q) => [Number(q[0]), Number(q[1])]).filter((q) => q.every(isFinite));
       const need = c.type === 'linear' ? 2 : c.type === 'count' ? 1 : 3;
       if (pts.length < need) throw new Error(`${c.type} needs at least ${need} points`);
-      const ms = c.type === 'count' ? pts.map((q) => ({ id: uid('mk'), conditionId: c.id, pageKey: key, type: 'count', points: [q] })) : [{ id: uid('mk'), conditionId: c.id, pageKey: key, type: c.type, points: pts }];
+      const extra = { ...(args.label ? { label: String(args.label) } : {}), ...(args.deduct && c.type !== 'linear' && c.type !== 'count' ? { deduct: true } : {}) };
+      const ms = c.type === 'count' ? pts.map((q) => ({ id: uid('mk'), conditionId: c.id, pageKey: key, type: 'count', points: [q], ...extra })) : [{ id: uid('mk'), conditionId: c.id, pageKey: key, type: c.type, points: pts, ...extra }];
       commit((pp) => ms.forEach((m) => pp.markups.push(m)), 'markups');
       out.changed = true;
       return { ok: true, condition: summarizeCondition(c) };
+    }
+    case 'list_views': {
+      const key = resolveSheet(args.sheet);
+      const vs = await viewsFor(key);
+      const sheetScale = p.pages[key].scale ? p.pages[key].scale.label : null;
+      return {
+        sheet: sheetName(key),
+        sheet_scale: sheetScale,
+        views: vs.map((v) => ({ number: v.number, title: v.title, scale: v.scale, box_pt: v.box, ...(v.scale && sheetScale && v.scale !== sheetScale ? { warning: `view scale ${v.scale} differs from sheet scale ${sheetScale}` } : {}) })),
+      };
+    }
+    case 'find_regions': {
+      const key = resolveSheet(args.sheet);
+      const sc = scaleFor(key);
+      if (!sc) throw new Error(`Sheet ${sheetName(key)} has no scale yet. Set it first.`);
+      const area = await resolveArea(key, args);
+      const [idx, sz, { items }] = await Promise.all([viewer.getSnapIndex(key), viewer.pageSize(key), viewer.getPageText(key)]);
+      if (!idx || !idx.n) throw new Error('This sheet has no vector linework (probably a scan), so zones can\'t be found. Use look_at_sheet and draw_markup instead.');
+      const r = findRegions(key, idx, sz.w, sz.h, area.box, { k: sc.ptPerUnit, mode: args.include_hatch_lines ? 'all' : 'outline', minArea: +args.min_sf || 4, textItems: items });
+      state.regionLists.set(r.token, { list: r.regions, key, view: area.name });
+      const closed = r.regions.filter((x) => !x.open);
+      return {
+        sheet: sheetName(key),
+        view: area.name,
+        zones_found: closed.length,
+        zones: closed.slice(0, 60).map((z) => ({ id: z.id, net_sf: z.area_sf, gross_sf: z.gross_sf, openings: z.openings, box_pt: z.box_pt, centre_pt: z.centre_pt, hatch: z.hatch, tags: z.tags })),
+        note: closed.length > 60 ? `Showing the 60 largest of ${closed.length}. Narrow with view/box or min_sf.` : 'Zones are listed largest first. Tags inside a zone usually name its material.',
+      };
+    }
+    case 'measure_regions':
+    case 'measure_similar': {
+      const c = resolveCondition(args.condition, ['area', 'roof']);
+      let ids = name === 'measure_regions' ? [].concat(args.regions || []) : [];
+      if (name === 'measure_similar') {
+        const token = String(args.region || '').split('.')[0];
+        const L = state.regionLists.get(token);
+        if (!L) throw new Error('Unknown zone id. Call find_regions first.');
+        ids = regionsLike(args.region, L.list).map((z) => z.id);
+      }
+      if (!ids.length) throw new Error('No zones to measure.');
+      const made = [];
+      const results = [];
+      for (const id of ids) {
+        let o;
+        try {
+          o = regionOutline(id);
+        } catch (e) {
+          results.push({ zone: id, error: e.message });
+          continue;
+        }
+        const k = scaleFor(o.pageKey).ptPerUnit;
+        const gross = polygonArea(o.outer) / (k * k);
+        const cen = centroid(o.outer);
+        const dup = made.concat(p.markups.filter((m) => m.pageKey === o.pageKey && m.conditionId === c.id && !m.deduct)).find((m) => {
+          const a2 = polygonArea(m.points) / (k * k);
+          return Math.abs(a2 - gross) < Math.max(0.5, gross * 0.01) && pointInPolygon(cen, m.points);
+        });
+        if (dup) {
+          results.push({ zone: id, result: 'already measured' });
+          continue;
+        }
+        const label = args.label ? String(args.label) : undefined;
+        made.push({ id: uid('mk'), conditionId: c.id, pageKey: o.pageKey, type: c.type, points: o.outer, ...(label ? { label } : {}) });
+        let ded = 0;
+        if (args.deduct_openings !== false) {
+          for (const hole of o.holes) {
+            const a = polygonArea(hole) / (k * k);
+            ded += a;
+            made.push({ id: uid('mk'), conditionId: c.id, pageKey: o.pageKey, type: c.type, points: hole, deduct: true, ...(label ? { label } : {}) });
+          }
+        }
+        results.push({ zone: id, gross_sf: +gross.toFixed(1), openings: args.deduct_openings === false ? 0 : o.holes.length, openings_sf: +ded.toFixed(1), net_sf: +(gross - ded).toFixed(1) });
+      }
+      addMarkups(made);
+      if (made.length) {
+        out.changed = true;
+        const key = made[0].pageKey;
+        if (store.ui.pageKey !== key) await ctx.goToPage(key);
+      }
+      const net = results.reduce((s2, r) => s2 + (r.net_sf || 0), 0);
+      return { condition: c.name, label: args.label || null, measured: results.filter((r) => r.net_sf != null).length, net_sf: +net.toFixed(1), zones: results };
+    }
+    case 'review_markups': {
+      const key = resolveSheet(args.sheet);
+      const area = await resolveArea(key, args);
+      const ms = p.markups.filter((m) => m.pageKey === key);
+      const sz = await viewer.pageSize(key);
+      const full = area.box[0] === 0 && area.box[1] === 0 && area.box[2] >= sz.w - 1;
+      const img = await viewer.renderJpeg(key, 1536, full ? null : area.box, (g, s2) => {
+        for (const m of ms) {
+          const c = condition(m.conditionId);
+          const col = c ? c.color : '#888';
+          g.lineWidth = 2.5 / s2;
+          g.strokeStyle = col;
+          g.fillStyle = col + (m.deduct ? '00' : '55');
+          if (m.type === 'count') {
+            for (const [x, y] of m.points) {
+              g.beginPath();
+              g.arc(x, y, 6 / s2, 0, Math.PI * 2);
+              g.fillStyle = col;
+              g.fill();
+            }
+            continue;
+          }
+          g.beginPath();
+          m.points.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+          if (m.type !== 'linear') g.closePath();
+          if (m.deduct) g.setLineDash([6 / s2, 4 / s2]);
+          if (m.type !== 'linear') g.fill();
+          g.stroke();
+          g.setLineDash([]);
+        }
+      });
+      out.image = { sheet: sheetName(key), data: img.dataUrl.split(',')[1] };
+      // Problems worth checking
+      const issues = [];
+      if (!p.pages[key].scale) issues.push('Sheet has no scale — quantities are not counted.');
+      const byCond = new Map();
+      for (const m of ms) {
+        if (!byCond.has(m.conditionId)) byCond.set(m.conditionId, []);
+        byCond.get(m.conditionId).push(m);
+      }
+      for (const [cid, list] of byCond) {
+        const c = condition(cid);
+        const shapes = list.filter((m) => !m.deduct && m.type !== 'linear' && m.type !== 'count');
+        for (let i = 0; i < shapes.length; i++)
+          for (let j = i + 1; j < shapes.length; j++) {
+            if (pointInPolygon(centroid(shapes[i].points), shapes[j].points) || pointInPolygon(centroid(shapes[j].points), shapes[i].points)) {
+              issues.push(`${c ? c.name : '?'}: two markups overlap (possible double count)${shapes[i].label ? ' in ' + shapes[i].label : ''}.`);
+              break;
+            }
+          }
+        const unl = list.filter((m) => !m.label && !m.deduct).length;
+        if (unl) issues.push(`${c ? c.name : '?'}: ${unl} markup(s) without a label.`);
+      }
+      // Conditions measured on this sheet
+      const totals = [...byCond.keys()].map((cid) => {
+        const c = condition(cid);
+        return c ? { condition: c.name, colour: c.color, markups: byCond.get(cid).length } : null;
+      }).filter(Boolean);
+      return { sheet: sheetName(key), view: area.name, image_px: [img.w, img.h], markups_on_sheet: ms.length, conditions: totals, issues: issues.slice(0, 20), note: 'The image follows: coloured shapes are your markups (dashed = deductions).' };
     }
     case 'get_estimate': {
       const lines = computeLines();
@@ -525,13 +753,19 @@ Rules:
 
 Floor plans: measure rooms with fill_rooms using room labels (or ["all"]). Count tags with count_text; count repeated symbols with count_symbols.
 
-Exterior elevations and facades:
-1. Find what each material is: read the finish/material schedule or legend (read_sheet_text with contains "SCHEDULE" or "LEGEND", or the sheet a note points to), and the tags on the elevation (e.g. P-1, BR-1, MP-2, EIFS-1, FC-1).
-2. Create one area condition per exterior material (group "Exterior finishes"), named after the schedule description.
-3. For each elevation view on the sheet, measure each material zone: look at the region, then either fill_rooms with points inside the zone (works when the zone is a closed outline without hatch lines) or draw_markup with the zone's outline corners in page points. Work one elevation at a time and keep going until every elevation on the sheet is done.
-4. Note the elevation scale in its title (e.g. 1/8" = 1'-0") — make sure the sheet scale matches.
+Accuracy first:
+- Prefer the geometry tools (find_regions + measure_regions/measure_similar, fill_rooms, count_text, count_symbols). They measure the real linework exactly. Use draw_markup only when a zone is not closed, and say that it is approximate.
+- Always pass a label (view or area name) so the estimate shows a detailed breakdown.
+- Deduct openings (windows, doors, louvers, storefront) from wall finishes — measure_regions does this automatically.
 
-When finished, reply with a short plain summary: what you created and the quantities per condition. Mention anything you could not measure so the estimator can check it. Be brief; no tables.`;
+Exterior elevations and facades (and any sheet of closed shapes):
+1. list_views on the sheet to get each elevation's number, title, scale and box. Check the view scale matches the sheet scale.
+2. Work out the materials: tags on the elevation (e.g. P-1, BR-1, MP-2, EIFS-1, FC-1) and the finish schedule or legend that defines them (find it with read_sheet_text using contains "SCHEDULE" or "LEGEND", on this sheet or the sheet a note points to).
+3. Create one area condition per exterior material, named from the schedule, group "Exterior finishes".
+4. For each view, one at a time: find_regions with that view. Assign each zone a material using the tags inside it, its hatch description, and look_at_sheet of the view box when unsure. Measure with measure_regions (or measure_similar for every zone with the same pattern), label "<number> – <view title>". Glazing/storefront zones are openings, not wall finish.
+5. Keep going until every view on the sheet is done, then review.
+
+When finished, reply with a plain summary: each condition with its total, then the breakdown by view or label (one line each), the openings deducted, and anything you could not measure so the estimator can check it. No tables.`;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -593,7 +827,8 @@ async function ask(text) {
   let actions = 0;
   let changes = 0;
   let nudges = 0;
-  const MAX_STEPS = 40;
+  let reviewed = false;
+  const MAX_STEPS = 60;
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       // Only the newest image stays in context, to keep requests fast.
@@ -626,6 +861,17 @@ async function ask(text) {
       state.debug.push({ step, content: (msg.content || '').slice(0, 2000), thinking: (msg.thinking || '').slice(0, 2000), tool_calls: calls });
       state.history.push({ role: 'assistant', content: msg.content || '', ...(calls.length ? { tool_calls: calls } : {}) });
       if (!calls.length) {
+        if (content && changes && vision && !reviewed) {
+          // Before reporting, make the model check its own markups against the drawing.
+          reviewed = true;
+          thinking.querySelector('.txt').textContent = 'Checking its work…';
+          state.history.push({
+            role: 'user',
+            content:
+              'Before you report: call review_markups for each sheet (and view) you changed. Compare the coloured markups with the drawing. Fix anything wrong — missed zones, zones in the wrong material, double counts, unlabeled markups — using the tools. Then give the final summary: each condition with its total and the breakdown by view/label, plus anything you could not measure.',
+          });
+          continue;
+        }
         if (content) {
           finalText = content;
           break;
@@ -660,7 +906,10 @@ async function ask(text) {
         const out = {};
         let result;
         try {
+          console.info('[ai] tool start', fn.name);
+          const t0 = performance.now();
           result = await runTool(fn.name, args, out);
+          console.info('[ai] tool done', fn.name, Math.round(performance.now() - t0) + 'ms');
           addActivity(fn.name, args, result);
         } catch (e) {
           result = { error: String(e.message || e) };
@@ -740,6 +989,11 @@ function toolLabel(name, a) {
       count_symbols: `Counting symbols${s}…`,
       draw_markup: 'Drawing…',
       get_estimate: 'Checking the estimate…',
+      list_views: `Finding the views${s}…`,
+      find_regions: `Finding zones${a && a.view ? ` in view ${a.view}` : ''}${s}…`,
+      measure_regions: `Measuring zones into ${a && a.condition}…`,
+      measure_similar: `Measuring matching zones into ${a && a.condition}…`,
+      review_markups: `Checking the work${s}…`,
       set_markups: 'Setting markups…',
     }[name] || 'Working…'
   );
@@ -754,6 +1008,9 @@ function activitySummary(name, a, r) {
     }
     case 'count_text':
       return `Counted ${r.added} × "${a.text}" on ${r.sheet}`;
+    case 'measure_regions':
+    case 'measure_similar':
+      return `Measured ${r.measured} zone${r.measured === 1 ? '' : 's'} into ${r.condition}${r.label ? ` (${r.label})` : ''} — ${fmtNum(r.net_sf, 1)} SF net`;
     case 'count_symbols':
       return `Counted ${r.added} matching symbols on ${r.sheet}`;
     case 'create_condition':

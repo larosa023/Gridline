@@ -68,7 +68,11 @@ export function traceOuter(fill, w, h) {
       break;
     }
   if (start < 0) return [];
-  const at = (x, y) => x >= 0 && y >= 0 && x < w && y < h && fill[y * w + x] === 1;
+  return traceFrom((x, y) => x >= 0 && y >= 0 && x < w && y < h && fill[y * w + x] === 1, w, h, start);
+}
+
+/** Crack-following trace of the outer boundary of the region `at` belongs to, from raster index `start`. */
+export function traceFrom(at, w, h, start) {
   // Trace along pixel edges (crack following) so the outline encloses the pixels exactly.
   // State: current vertex (x, y) on the pixel-corner grid and direction d (0 right, 1 down, 2 left, 3 up).
   const sx0 = start % w;
@@ -172,7 +176,74 @@ export function clearFillCache(prefix = '') {
   for (const k of [...maskCache.keys()]) if (k.startsWith(prefix)) maskCache.delete(k);
 }
 
-function buildMask(index, pageW, pageH, gapPx) {
+/**
+ * Flag hatch-pattern segments: ones with at least two close, parallel, overlapping neighbours
+ * (brick coursing, siding laps, diagonal hatching), plus light-gray linework. Outlines rarely
+ * have tightly spaced parallel copies, so this separates "what a zone is made of" from
+ * "where the zone ends". Cached on the index.
+ */
+export function hatchFlags(index, spacing = 8) {
+  if (index._hatch) return index._hatch;
+  const n = index.n;
+  const seg = index.seg;
+  const flags = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (index.lum && index.lum[i] > 165) {
+      flags[i] = 1;
+      continue;
+    }
+    const k = i * 4;
+    const x1 = seg[k],
+      y1 = seg[k + 1],
+      x2 = seg[k + 2],
+      y2 = seg[k + 3];
+    const dx = x2 - x1,
+      dy = y2 - y1;
+    const L = Math.hypot(dx, dy);
+    if (L < 0.5) continue;
+    const ux = dx / L,
+      uy = dy / L;
+    const mx = (x1 + x2) / 2,
+      my = (y1 + y2) / 2;
+    // Hatching = a family of parallel lines with neighbours on BOTH sides. A zone's
+    // boundary sits next to the first hatch line but has nothing parallel beyond it.
+    let pos = Infinity,
+      neg = Infinity; // nearest parallel neighbour distance on each side
+    for (const j of index.near([mx, my], spacing + Math.min(L / 2, 24))) {
+      if (j === i) continue;
+      const q = j * 4;
+      const ex = seg[q + 2] - seg[q],
+        ey = seg[q + 3] - seg[q + 1];
+      const Lj = Math.hypot(ex, ey);
+      if (Lj < 0.5) continue;
+      const cos = Math.abs((ux * ex + uy * ey) / Lj);
+      if (cos < 0.9986) continue; // within ~3°
+      const jmx = (seg[q] + seg[q + 2]) / 2 - x1,
+        jmy = (seg[q + 1] + seg[q + 3]) / 2 - y1;
+      const side = jmx * uy - jmy * ux;
+      const perp = Math.abs(side);
+      if (perp < 0.05 || perp > spacing) continue;
+      // overlapping along the line direction
+      const t1 = (seg[q] - x1) * ux + (seg[q + 1] - y1) * uy;
+      const t2 = (seg[q + 2] - x1) * ux + (seg[q + 3] - y1) * uy;
+      // Real side-by-side overlap, not just touching end to end (hatch stopped at a window).
+      const ov = Math.min(L, Math.max(t1, t2)) - Math.max(0, Math.min(t1, t2));
+      if (ov < Math.min(L, Lj) * 0.25) continue;
+      if (side > 0) pos = Math.min(pos, perp);
+      else neg = Math.min(neg, perp);
+    }
+    // Evenly spaced on both sides = a hatch line. A boundary between two different
+    // patterns has neighbours on both sides but at different spacings.
+    if (isFinite(pos) && isFinite(neg)) {
+      const r = pos / neg;
+      if (r > 0.4 && r < 2.5) flags[i] = 1;
+    }
+  }
+  index._hatch = flags;
+  return flags;
+}
+
+export function buildMask(index, pageW, pageH, gapPx, mode = 'all') {
   const s = Math.min(2, MAX_SIDE / Math.max(pageW, pageH));
   const w = Math.ceil(pageW * s);
   const h = Math.ceil(pageH * s);
@@ -183,7 +254,9 @@ function buildMask(index, pageW, pageH, gapPx) {
   ctx.lineCap = 'round';
   ctx.beginPath();
   const seg = index.seg;
+  const hatch = mode === 'outline' ? hatchFlags(index) : null;
   for (let i = 0; i < index.n; i++) {
+    if (hatch && hatch[i]) continue;
     const k = i * 4;
     ctx.moveTo(seg[k] * s, seg[k + 1] * s);
     ctx.lineTo(seg[k + 2] * s, seg[k + 3] * s);
@@ -195,20 +268,34 @@ function buildMask(index, pageW, pageH, gapPx) {
   return { mask, w, h, s };
 }
 
+export function getMask(pageKey, index, pageW, pageH, gap = 'small', mode = 'all') {
+  const gapPx = { small: 2, medium: 5, large: 10 }[gap] || 2;
+  const key = `${pageKey}|${gapPx}|${mode}`;
+  let m = maskCache.get(key);
+  if (!m) {
+    m = buildMask(index, pageW, pageH, gapPx, mode);
+    m.gapPx = gapPx;
+    maskCache.set(key, m);
+  }
+  return m;
+}
+
 /**
  * Find the room polygon around page point p.
  * gap: 'small' | 'medium' | 'large' — how big a gap in the walls to bridge.
  * Returns { points } in page coordinates, or { error: 'leak'|'online'|'nolines' }.
  */
-export function fillAt(pageKey, index, pageW, pageH, p, gap = 'small') {
+export function fillAt(pageKey, index, pageW, pageH, p, gap = 'small', mode = 'smart') {
   if (!index || !index.n) return { error: 'nolines' };
-  const gapPx = { small: 2, medium: 5, large: 10 }[gap] || 2;
-  const key = `${pageKey}|${gapPx}`;
-  let m = maskCache.get(key);
-  if (!m) {
-    m = buildMask(index, pageW, pageH, gapPx);
-    maskCache.set(key, m);
+  if (mode === 'smart') {
+    // Ignore hatching first (so a brick or siding zone fills whole); if that leaks,
+    // the boundary itself was drawn like hatching, so fall back to every line.
+    const a = fillAt(pageKey, index, pageW, pageH, p, gap, 'outline');
+    if (!a.error) return a;
+    return fillAt(pageKey, index, pageW, pageH, p, gap, 'all');
   }
+  const m = getMask(pageKey, index, pageW, pageH, gap, mode);
+  const gapPx = m.gapPx;
   const sx = Math.floor(p[0] * m.s);
   const sy = Math.floor(p[1] * m.s);
   if (sx < 0 || sy < 0 || sx >= m.w || sy >= m.h) return { error: 'leak' };
@@ -226,7 +313,7 @@ export function fillAt(pageKey, index, pageW, pageH, p, gap = 'small') {
   // Drop vertices that collapsed onto each other or became collinear.
   pts = cleanRing(pts, 0.25);
   if (pts.length < 3) return { error: 'leak' };
-  return { points: pts };
+  return { points: pts, mode };
 }
 
 function cleanRing(pts, eps) {

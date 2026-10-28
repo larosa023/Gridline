@@ -321,6 +321,7 @@ export function renderInspector() {
     if (q.count != null) rows += `<div class="kv"><span>Count</span><b>${q.count}</b></div>`;
     parts.push(`<div class="insp-section">
       <div class="insp-title">Selected markup</div>
+      <label class="field" style="margin-bottom:8px"><span>Label / view</span><input data-ml="label" value="${esc(m.label || '')}" placeholder="e.g. Elev 1 – Front" /></label>
       ${rows}
       <div class="row">
         ${m.type === 'area' || m.type === 'roof' ? `<button class="btn small" data-act="deduct">${m.deduct ? 'Make additive' : 'Make deduction'}</button>` : ''}
@@ -369,6 +370,13 @@ export function renderInspector() {
       commit(() => (c[f] = v), 'conditions');
     };
     inp.addEventListener('change', save);
+    inp.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') inp.blur();
+    });
+  });
+  el.querySelectorAll('[data-ml="label"]').forEach((inp) => {
+    inp.addEventListener('change', () => commit(() => (inp.value.trim() ? (m.label = inp.value.trim()) : delete m.label), 'markups'));
     inp.addEventListener('keydown', (e) => {
       e.stopPropagation();
       if (e.key === 'Enter') inp.blur();
