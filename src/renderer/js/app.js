@@ -937,6 +937,9 @@ document.addEventListener('keydown', (e) => {
     return setTool(store.ui.tool === 'linear' ? 'area' : 'linear');
   }
   if (k.toLowerCase() === 's' && !e.altKey) return toggleSnap();
+  if (k === '[') return togglePanel('left');
+  if (k === ']') return togglePanel('right');
+  if (k === '\\') return togglePanel('both');
   const tools = { v: 'select', h: 'pan', l: 'linear', a: 'area', r: 'roof', c: 'count', m: 'measure', k: 'calibrate' };
   if (tools[k.toLowerCase()] && !e.altKey) return setTool(tools[k.toLowerCase()]);
   switch (k) {
@@ -1010,6 +1013,36 @@ $('#emptyOpen').onclick = () => openProject();
 $('#btnSave').onclick = () => saveProject();
 $('#btnTheme').onclick = toggleTheme;
 $('#btnSettings').onclick = openSettings;
+
+// ---------- Collapsible side panels ----------
+const panels = { left: pref('gridline-hide-left', 'off') === 'on', right: pref('gridline-hide-right', 'off') === 'on' };
+function applyPanels() {
+  const ws = $('#workspace');
+  ws.classList.toggle('hide-left', panels.left);
+  ws.classList.toggle('hide-right', panels.right);
+  const l = $('#toggleLeft');
+  const r = $('#toggleRight');
+  l.innerHTML = icon(panels.left ? 'chevronR' : 'chevronL', 14);
+  r.innerHTML = icon(panels.right ? 'chevronL' : 'chevronR', 14);
+  l.classList.toggle('collapsed', panels.left);
+  r.classList.toggle('collapsed', panels.right);
+  l.title = panels.left ? 'Show sheets & conditions ( [ )' : 'Hide sheets & conditions ( [ )';
+  r.title = panels.right ? 'Show properties ( ] )' : 'Hide properties ( ] )';
+  setPref('gridline-hide-left', panels.left ? 'on' : 'off');
+  setPref('gridline-hide-right', panels.right ? 'on' : 'off');
+}
+function togglePanel(side) {
+  if (side === 'both') {
+    const hide = !(panels.left && panels.right);
+    panels.left = panels.right = hide;
+  } else panels[side] = !panels[side];
+  applyPanels();
+}
+$('#toggleLeft').onclick = () => togglePanel('left');
+$('#toggleRight').onclick = () => togglePanel('right');
+$('#toggleLeft').addEventListener('pointerdown', (e) => e.stopPropagation());
+$('#toggleRight').addEventListener('pointerdown', (e) => e.stopPropagation());
+applyPanels();
 $('#btnNewCond').onclick = () => newCondition();
 $('#condSearch').addEventListener('input', renderConditions);
 $('#projectName').addEventListener('change', (e) => {
@@ -1104,6 +1137,12 @@ function menuCmd(name, arg) {
       return setView('estimate');
     case 'fit':
       return viewer.fit();
+    case 'toggle-left':
+      return togglePanel('left');
+    case 'toggle-right':
+      return togglePanel('right');
+    case 'toggle-both':
+      return togglePanel('both');
     case 'toggle-theme':
       return toggleTheme();
     case 'shortcuts':

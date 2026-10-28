@@ -279,8 +279,64 @@ button {
 .workspace {
   height: calc(100% - 52px);
   display: grid;
-  grid-template-columns: 272px 1fr 296px;
+  --lw: 272px;
+  --rw: 296px;
+  grid-template-columns: var(--lw) minmax(0, 1fr) var(--rw);
   min-height: 0;
+  transition: grid-template-columns 0.2s ease;
+}
+.workspace.hide-left {
+  --lw: 0px;
+}
+.workspace.hide-right {
+  --rw: 0px;
+}
+.workspace.hide-left > .left,
+.workspace.hide-right > .right {
+  border: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+.panel {
+  min-width: 0;
+}
+/* Edge tabs that tuck the side panels away and bring them back */
+.edge-toggle {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 6;
+  width: 16px;
+  height: 56px;
+  border: 1px solid var(--border-2);
+  background: var(--raised);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  box-shadow: var(--shadow);
+  transition: width 0.12s, color 0.12s, background 0.12s;
+}
+.edge-toggle.left {
+  left: 0;
+  border-left: 0;
+  border-radius: 0 9px 9px 0;
+}
+.edge-toggle.right {
+  right: 0;
+  border-right: 0;
+  border-radius: 9px 0 0 9px;
+}
+.edge-toggle:hover {
+  width: 22px;
+  color: var(--accent);
+  background: var(--panel-2);
+}
+.edge-toggle.collapsed {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-2));
 }
 .workspace.estimate-mode {
   grid-template-columns: 1fr;
@@ -1558,8 +1614,11 @@ kbd {
   }
 }
 @media (max-width: 1240px) {
-  .workspace {
-    grid-template-columns: 240px 1fr 268px;
+  .workspace:not(.hide-left) {
+    --lw: 240px;
+  }
+  .workspace:not(.hide-right) {
+    --rw: 268px;
   }
 }
 

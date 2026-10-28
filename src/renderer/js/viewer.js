@@ -29,7 +29,17 @@ export function initViewer({ canvasEl, stageEl, viewport, onViewChange }) {
   stage = stageEl;
   viewportEl = viewport;
   onChange = onViewChange;
-  new ResizeObserver(() => onChange && onChange('resize')).observe(viewportEl);
+  // When a side panel slides in or out, shift the view so the drawing stays put on screen.
+  let lastLeft = viewportEl.getBoundingClientRect().left;
+  new ResizeObserver(() => {
+    const left = viewportEl.getBoundingClientRect().left;
+    if (view.pageKey && left !== lastLeft) {
+      view.x += lastLeft - left;
+      apply(false, true);
+    }
+    lastLeft = left;
+    onChange && onChange('resize');
+  }).observe(viewportEl);
 }
 
 export async function loadDocument(docId, bytes) {
