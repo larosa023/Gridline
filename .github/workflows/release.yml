@@ -1,0 +1,63 @@
+name: Release
+
+# Push a tag like v1.0.1 (e.g. `npm run release:patch`) to build the Windows
+# installer and publish it to GitHub Releases. Installed copies of Gridline
+# pick the new version up automatically through the built-in updater.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Check tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          v=$(node -p "require('./package.json').version")
+          if [ "v$v" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version v$v"
+            exit 1
+          fi
+
+      - name: Build installer and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win nsis --x64 --publish always
+
+      - name: Add stable-named installer (for a permanent download link)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          v=$(node -p "require('./package.json').version")
+          cp "dist/Gridline-Setup-$v.exe" "dist/Gridline-Setup.exe"
+          gh release upload "${GITHUB_REF_NAME}" "dist/Gridline-Setup.exe" --clobber
+          gh release edit "${GITHUB_REF_NAME}" --title "Gridline $v" --latest
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Gridline-Setup
+          path: |
+            dist/*.exe
+            dist/latest.yml
+          if-no-files-found: error

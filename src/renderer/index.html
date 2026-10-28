@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; worker-src 'self' blob:; font-src 'self' data: blob:; connect-src 'self' data: blob:" />
+  <title>Gridline</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="../../build/icon.png" alt="" class="brand-mark" />
+      <span class="brand-name">Gridline</span>
+      <span class="brand-sep">/</span>
+      <input id="projectName" class="project-name" spellcheck="false" value="Untitled project" aria-label="Project name" />
+    </div>
+
+    <div class="seg" role="tablist" aria-label="View">
+      <button class="seg-btn active" data-view="takeoff" data-icon="layers" data-size="16">Takeoff</button>
+      <button class="seg-btn" data-view="estimate" data-icon="table" data-size="16">Estimate</button>
+    </div>
+
+    <div class="topbar-right">
+      <button id="updatePill" class="update-pill" hidden></button>
+      <button class="btn ghost icon-only" id="btnTheme" title="Toggle theme (Ctrl+Shift+T)" data-icon="moon"></button>
+      <button class="btn ghost" id="btnOpen" data-icon="folder">Open</button>
+      <button class="btn" id="btnAddPdf" data-icon="filePlus">Add drawings</button>
+      <button class="btn primary" id="btnSave" data-icon="save">Save</button>
+    </div>
+  </header>
+
+  <main class="workspace" id="workspace">
+    <!-- LEFT: sheets + conditions -->
+    <aside class="panel left">
+      <div class="tabs">
+        <button class="tab active" data-left="sheets">Sheets <span class="badge" id="sheetCount">0</span></button>
+        <button class="tab" data-left="conditions">Conditions <span class="badge" id="condCount">0</span></button>
+      </div>
+      <div class="panel-body" id="sheetsPanel">
+        <div class="sheet-list" id="sheetList"></div>
+      </div>
+      <div class="panel-body" id="conditionsPanel" hidden>
+        <div class="panel-tools">
+          <div class="search">
+            <span data-icon="search" data-size="15"></span>
+            <input id="condSearch" placeholder="Filter conditions" />
+          </div>
+          <button class="btn small primary" id="btnNewCond" data-icon="plus" data-size="15">New</button>
+        </div>
+        <div class="cond-list" id="condList"></div>
+      </div>
+    </aside>
+
+    <!-- CENTER: drawing viewer -->
+    <section class="center">
+      <div class="toolbar">
+        <div class="tool-group" id="toolGroup">
+          <button class="tool" data-tool="select" title="Select (V)" data-icon="select"></button>
+          <button class="tool" data-tool="pan" title="Pan (H)" data-icon="pan"></button>
+          <span class="tool-sep"></span>
+          <button class="tool" data-tool="linear" title="Linear takeoff (L)" data-icon="linear"><span>Linear</span></button>
+          <button class="tool" data-tool="area" title="Area takeoff (A)" data-icon="area"><span>Area</span></button>
+          <button class="tool" data-tool="count" title="Count takeoff (C)" data-icon="count"><span>Count</span></button>
+          <span class="tool-sep"></span>
+          <button class="tool" data-tool="measure" title="Quick measure (M)" data-icon="measure"></button>
+        </div>
+
+        <div class="active-cond" id="activeCond"></div>
+
+        <div class="tool-group right">
+          <div class="scale-box" title="Sheet scale">
+            <select id="scaleSelect"></select>
+            <button class="btn small ghost" id="btnCalibrate" data-icon="calibrate" data-size="15" title="Calibrate scale from a known dimension (K)"><span>Calibrate</span></button>
+          </div>
+          <span class="tool-sep"></span>
+          <button class="tool" id="btnZoomOut" title="Zoom out (-)" data-icon="zoomOut"></button>
+          <button class="zoom-readout" id="zoomReadout" title="Fit page (F)">100%</button>
+          <button class="tool" id="btnZoomIn" title="Zoom in (+)" data-icon="zoomIn"></button>
+          <button class="tool" id="btnFit" title="Fit page (F)" data-icon="fit"></button>
+        </div>
+      </div>
+
+      <div class="viewport" id="viewport" tabindex="0">
+        <div class="stage" id="stage">
+          <canvas id="pdfCanvas"></canvas>
+          <svg id="overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+        <div class="hud" id="hud" hidden></div>
+        <div class="banner" id="scaleBanner" hidden>
+          <span>This sheet has no scale.</span>
+          <button class="btn small" id="bannerCalibrate">Calibrate</button>
+          <span class="muted">or pick a scale above</span>
+        </div>
+        <div class="empty" id="emptyState">
+          <div class="empty-card">
+            <img src="../../build/icon.png" alt="" width="64" height="64" />
+            <h1>Start a takeoff</h1>
+            <p>Add PDF drawings, set the sheet scale, then measure linear, area and count quantities against your conditions.</p>
+            <div class="empty-actions">
+              <button class="btn primary" id="emptyAdd" data-icon="filePlus">Add drawings</button>
+              <button class="btn" id="emptyOpen" data-icon="folder">Open project</button>
+            </div>
+            <p class="muted small">Tip: drag &amp; drop PDFs anywhere in the window.</p>
+          </div>
+        </div>
+        <div class="page-nav" id="pageNav" hidden>
+          <button class="tool" id="btnPrevPage" data-icon="chevronL" title="Previous sheet (PgUp)"></button>
+          <span id="pageNavLabel"></span>
+          <button class="tool" id="btnNextPage" data-icon="chevronR" title="Next sheet (PgDn)"></button>
+        </div>
+      </div>
+
+      <footer class="statusbar">
+        <span id="statusHint">Select a tool to begin</span>
+        <span class="grow"></span>
+        <span id="statusCursor"></span>
+        <span id="statusScale"></span>
+        <span id="statusVersion" class="muted"></span>
+      </footer>
+    </section>
+
+    <!-- RIGHT: inspector -->
+    <aside class="panel right" id="inspector"></aside>
+
+    <!-- ESTIMATE VIEW -->
+    <section class="estimate" id="estimateView" hidden></section>
+  </main>
+
+  <div class="drop-overlay" id="dropOverlay" hidden><div>Drop PDF drawings to add them</div></div>
+  <div class="modal-root" id="modalRoot"></div>
+  <div class="toasts" id="toasts"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,89 @@
+{
+  "name": "gridline",
+  "productName": "Gridline",
+  "version": "1.0.0",
+  "description": "Modern, lightweight construction takeoff and estimating for Windows.",
+  "author": "Anthony LaRosa",
+  "license": "MIT",
+  "main": "src/main/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/larosa023/Gridline.git"
+  },
+  "scripts": {
+    "vendor": "node scripts/copy-vendor.js",
+    "postinstall": "node scripts/copy-vendor.js",
+    "start": "electron .",
+    "test": "node --test test/*.test.mjs",
+    "dist": "electron-builder --win nsis",
+    "release": "electron-builder --win nsis --publish always",
+    "release:patch": "npm version patch -m \"Release v%s\" && git push --follow-tags",
+    "release:minor": "npm version minor -m \"Release v%s\" && git push --follow-tags"
+  },
+  "dependencies": {
+    "electron-log": "^5.4.4",
+    "electron-updater": "^6.8.11"
+  },
+  "devDependencies": {
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0",
+    "pdfjs-dist": "^6.4.299"
+  },
+  "build": {
+    "appId": "com.larosa023.gridline",
+    "productName": "Gridline",
+    "copyright": "Copyright © 2026 Anthony LaRosa",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "package.json",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "Gridline-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Gridline",
+      "uninstallDisplayName": "Gridline",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    },
+    "fileAssociations": [
+      {
+        "ext": "gridline",
+        "name": "Gridline Project",
+        "description": "Gridline takeoff project",
+        "icon": "build/icon.ico",
+        "role": "Editor"
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "larosa023",
+        "repo": "Gridline",
+        "releaseType": "release"
+      }
+    ]
+  }
+}

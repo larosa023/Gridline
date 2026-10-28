@@ -1,0 +1,219 @@
+import { modal, h, esc, $ } from './dom.js';
+import { icon } from './icons.js';
+import { COLORS, store, nextColor } from './store.js';
+import { parseLength, formatFeetInches, presetToScale, SCALE_PRESETS } from './units.js';
+
+const TYPE_INFO = {
+  linear: { label: 'Linear', icon: 'linear', hint: 'Walls, curbs, piping, trim' },
+  area: { label: 'Area', icon: 'area', hint: 'Slabs, flooring, roofing' },
+  count: { label: 'Count', icon: 'count', hint: 'Fixtures, doors, devices' },
+};
+export { TYPE_INFO };
+
+/** Create or edit a condition. Returns the condition fields or null. */
+export function conditionDialog(initial = {}) {
+  const isNew = !initial.id;
+  const metric = store.project.unit === 'm';
+  let type = initial.type || 'linear';
+  let color = initial.color || nextColor();
+  const groups = [...new Set(store.project.conditions.map((c) => c.group).filter(Boolean))];
+
+  return modal({
+    title: isNew ? 'New condition' : 'Edit condition',
+    buttons: [
+      { label: 'Cancel', value: null },
+      { label: isNew ? 'Create & start takeoff' : 'Save', primary: true },
+    ],
+    build(body) {
+      body.append(
+        h(`<div>
+          <div class="field full" style="margin-bottom:12px"><span>Type</span>
+            <div class="type-pick">${Object.entries(TYPE_INFO)
+              .map(
+                ([k, t]) =>
+                  `<button type="button" data-type="${k}" class="${k === type ? 'sel' : ''}" ${isNew ? '' : 'disabled'}>${icon(t.icon, 20)}${t.label}</button>`
+              )
+              .join('')}</div>
+            <small class="muted" id="typeHint">${TYPE_INFO[type].hint}</small>
+          </div>
+          <div class="fields">
+            <label class="field full"><span>Name</span><input name="name" required value="${esc(initial.name || '')}" placeholder="e.g. Interior partition – 3-5/8&quot; mtl stud" /></label>
+            <label class="field"><span>Group / division</span><input name="group" list="groupList" value="${esc(initial.group || '')}" placeholder="e.g. 09 – Finishes" />
+              <datalist id="groupList">${groups.map((g) => `<option value="${esc(g)}">`).join('')}</datalist></label>
+            <label class="field" data-only="linear area"><span>Height <small class="muted">(${metric ? 'm' : 'ft-in'}, optional)</small></span><input name="height" value="${initial.height ? (metric ? initial.height : formatFeetInches(initial.height)) : ''}" placeholder="${metric ? '3.0' : "10'-0\""}" /></label>
+            <label class="field" data-only="area"><span>Depth / thickness <small class="muted">(${metric ? 'mm' : 'in'}, optional)</small></span><input name="depth" type="number" step="any" min="0" value="${initial.depth || ''}" placeholder="${metric ? '100' : '4'}" /></label>
+            <label class="field"><span>Waste</span><div class="input-affix"><input name="waste" type="number" step="any" min="0" value="${initial.waste ?? 0}" /><i>%</i></div></label>
+            <label class="field"><span>Material cost</span><div class="input-affix"><input name="matCost" type="number" step="any" min="0" value="${initial.matCost ?? ''}" placeholder="0.00" /><i data-unit>/LF</i></div></label>
+            <label class="field"><span>Labor cost</span><div class="input-affix"><input name="laborCost" type="number" step="any" min="0" value="${initial.laborCost ?? ''}" placeholder="0.00" /><i data-unit>/LF</i></div></label>
+            <div class="field full"><span>Color</span><div class="colors">${COLORS.map(
+              (c) => `<button type="button" class="color-dot ${c === color ? 'sel' : ''}" data-color="${c}" style="background:${c}"></button>`
+            ).join('')}</div></div>
+          </div>
+        </div>`)
+      );
+      const sync = () => {
+        body.querySelectorAll('[data-type]').forEach((b) => b.classList.toggle('sel', b.dataset.type === type));
+        body.querySelectorAll('[data-only]').forEach((f) => (f.hidden = !f.dataset.only.split(' ').includes(type)));
+        const u = type === 'linear' ? (metric ? '/m' : '/LF') : type === 'area' ? (metric ? '/m²' : '/SF') : '/EA';
+        body.querySelectorAll('[data-unit]').forEach((i) => (i.textContent = u));
+        $('#typeHint', body).textContent = TYPE_INFO[type].hint;
+      };
+      body.querySelectorAll('[data-type]').forEach(
+        (b) =>
+          (b.onclick = () => {
+            type = b.dataset.type;
+            sync();
+          })
+      );
+      body.querySelectorAll('[data-color]').forEach(
+        (b) =>
+          (b.onclick = () => {
+            color = b.dataset.color;
+            body.querySelectorAll('[data-color]').forEach((x) => x.classList.toggle('sel', x === b));
+          })
+      );
+      sync();
+    },
+    onSubmit(form) {
+      const f = new FormData(form);
+      const name = String(f.get('name') || '').trim();
+      if (!name) return false;
+      let height = 0;
+      const hs = String(f.get('height') || '').trim();
+      if (hs && type !== 'count') {
+        height = parseLength(hs, store.project.unit);
+        if (!isFinite(height) || height < 0) {
+          form.querySelector('[name=height]').setCustomValidity('Enter a length like 10\'-0" or 9.5');
+          form.reportValidity();
+          form.querySelector('[name=height]').setCustomValidity('');
+          return false;
+        }
+      }
+      return {
+        name,
+        type,
+        color,
+        group: String(f.get('group') || '').trim(),
+        height: type === 'count' ? 0 : height,
+        depth: type === 'area' ? +f.get('depth') || 0 : 0,
+        waste: +f.get('waste') || 0,
+        matCost: +f.get('matCost') || 0,
+        laborCost: +f.get('laborCost') || 0,
+      };
+    },
+  });
+}
+
+/** Ask for the real length of a drawn calibration line. */
+export function calibrateDialog(ptLength) {
+  const metric = store.project.unit === 'm';
+  const pageCount = Object.keys(store.project.pages).length;
+  return modal({
+    title: 'Calibrate scale',
+    buttons: [
+      { label: 'Cancel', value: null },
+      { label: 'Set scale', primary: true },
+    ],
+    build(body) {
+      body.append(
+        h(`<div>
+          <p>Enter the real-world length of the line you just drew.</p>
+          <div class="fields">
+            <label class="field full"><span>Known length</span><input name="len" placeholder="${metric ? 'e.g. 6.0m or 6000mm' : 'e.g. 24\'-6&quot; or 24.5'}" /></label>
+            <label class="field full" style="flex-direction:row;align-items:center;gap:8px">
+              <input type="checkbox" name="all" style="width:auto;height:auto" ${pageCount > 1 ? '' : 'disabled'} />
+              <span style="font-size:12.5px;color:var(--text-2)">Apply to all sheets in this drawing set</span></label>
+          </div>
+        </div>`)
+      );
+    },
+    onSubmit(form) {
+      const inp = form.querySelector('[name=len]');
+      const v = parseLength(inp.value, store.project.unit);
+      if (!isFinite(v) || v <= 0) {
+        inp.setCustomValidity('Enter a length, e.g. 24\'-6"');
+        form.reportValidity();
+        inp.setCustomValidity('');
+        return false;
+      }
+      const ptPerUnit = ptLength / v;
+      return {
+        scale: { ptPerUnit, unit: store.project.unit, label: 'Calibrated', calibrated: true },
+        all: form.querySelector('[name=all]').checked,
+      };
+    },
+  });
+}
+
+export function scaleOptionsHtml(current) {
+  const groups = {};
+  SCALE_PRESETS.forEach((p, i) => (groups[p.group] = groups[p.group] || []).push([p, i]));
+  let html = `<option value="" ${!current ? 'selected' : ''}>Set scale…</option>`;
+  if (current && current.calibrated) html += `<option value="cal" selected>Calibrated</option>`;
+  for (const [g, list] of Object.entries(groups)) {
+    html += `<optgroup label="${g}">`;
+    for (const [p, i] of list) {
+      const sel = current && !current.calibrated && current.label === p.label ? 'selected' : '';
+      html += `<option value="${i}" ${sel}>${esc(p.label)}</option>`;
+    }
+    html += `</optgroup>`;
+  }
+  html += `<option value="calibrate">Calibrate from drawing…</option>`;
+  return html;
+}
+
+export { presetToScale };
+
+export function shortcutsDialog() {
+  const rows = [
+    ['Select / edit', 'V'],
+    ['Pan', 'H or hold Space'],
+    ['Linear takeoff', 'L'],
+    ['Area takeoff', 'A'],
+    ['Count takeoff', 'C'],
+    ['Quick measure', 'M'],
+    ['Calibrate scale', 'K'],
+    ['Finish shape', 'Enter / double-click / right-click'],
+    ['Remove last point', 'Backspace'],
+    ['Cancel', 'Esc'],
+    ['Snap 45° / 90°', 'hold Shift'],
+    ['Deduct (area)', 'hold Alt while finishing'],
+    ['Zoom', 'Mouse wheel'],
+    ['Fit page', 'F'],
+    ['Prev / next sheet', 'PgUp / PgDn'],
+    ['Delete markup', 'Del'],
+    ['Undo / redo', 'Ctrl+Z / Ctrl+Y'],
+    ['Save', 'Ctrl+S'],
+    ['Takeoff / Estimate', 'Ctrl+1 / Ctrl+2'],
+    ['Export CSV', 'Ctrl+E'],
+  ];
+  return modal({
+    title: 'Keyboard shortcuts',
+    wide: true,
+    buttons: [{ label: 'Close', value: null }],
+    build(body) {
+      body.append(
+        h(`<div class="kbd-grid">${rows
+          .map(([a, k]) => `<div><span>${a}</span><span>${k.split(' / ').map((x) => `<kbd>${esc(x)}</kbd>`).join(' ')}</span></div>`)
+          .join('')}</div>`)
+      );
+    },
+  });
+}
+
+export function aboutDialog(version, onCheck) {
+  return modal({
+    title: 'About Gridline',
+    buttons: [{ label: 'Close', value: null }],
+    build(body) {
+      const n = h(`<div style="text-align:center;padding:6px 0 4px">
+        <img src="../../build/icon.png" width="64" height="64" alt="" />
+        <h2 style="margin:10px 0 2px">Gridline</h2>
+        <p class="muted" style="margin:0 0 14px">Version ${esc(version)} · Construction takeoff &amp; estimating</p>
+        <button type="button" class="btn" data-icon="refresh">Check for updates</button>
+      </div>`);
+      n.querySelector('button').onclick = onCheck;
+      body.append(n);
+    },
+  });
+}
