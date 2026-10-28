@@ -152,7 +152,8 @@ export function findRegions(pageKey, index, pageW, pageH, rectPt, { k, mode = 'o
   const { labels, regions } = labelRegions(m.mask, m.w, m.h, [rx0, ry0, rx1, ry1]);
   const token = 'R' + ++tokenN;
   cache.set(token, { pageKey, m, labels, regions, index, k, textItems });
-  if (cache.size > 12) cache.delete(cache.keys().next().value);
+  // Each entry holds a full-sheet label map (~25 MB); keep only the latest few.
+  while (cache.size > 3) cache.delete(cache.keys().next().value);
 
   // Hatch inside each region: segments flagged as hatching whose midpoint lies in it.
   const hatch = hatchFlags(index);

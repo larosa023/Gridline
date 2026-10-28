@@ -272,11 +272,16 @@ export function getMask(pageKey, index, pageW, pageH, gap = 'small', mode = 'all
   const gapPx = { small: 2, medium: 5, large: 10 }[gap] || 2;
   const key = `${pageKey}|${gapPx}|${mode}`;
   let m = maskCache.get(key);
-  if (!m) {
-    m = buildMask(index, pageW, pageH, gapPx, mode);
-    m.gapPx = gapPx;
+  if (m) {
+    maskCache.delete(key); // most recent last
     maskCache.set(key, m);
+    return m;
   }
+  // Masks are ~7 MB each; keep only the few most recently used.
+  while (maskCache.size >= 3) maskCache.delete(maskCache.keys().next().value);
+  m = buildMask(index, pageW, pageH, gapPx, mode);
+  m.gapPx = gapPx;
+  maskCache.set(key, m);
   return m;
 }
 

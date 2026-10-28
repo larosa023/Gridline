@@ -36,3 +36,23 @@ test('long diagonal lines are findable anywhere along them', () => {
   const s = findSnap(idx, [2500, 1503], 8);
   assert.equal(s.kind, 'line');
 });
+
+test('packed (frozen) index finds the same segments', () => {
+  const a = new SnapIndex();
+  const b = new SnapIndex();
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2000;
+  for (let i = 0; i < 3000; i++) {
+    const s = [rnd(), rnd(), rnd() / 10 + 5, rnd() / 10 + 5];
+    a.add(s[0], s[1], s[0] + s[2], s[1] + s[3]);
+    b.add(s[0], s[1], s[0] + s[2], s[1] + s[3]);
+  }
+  b.freeze();
+  for (let i = 0; i < 200; i++) {
+    const p = [rnd(), rnd()];
+    assert.deepEqual([...b.near(p, 30)].sort((x, y) => x - y), [...a.near(p, 30)].sort((x, y) => x - y));
+    const sa = findSnap(a, p, 12);
+    const sb = findSnap(b, p, 12);
+    assert.deepEqual(sb && sb.point, sa && sa.point);
+  }
+});

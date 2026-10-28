@@ -18,7 +18,7 @@ export class SnapIndex {
   }
 
   add(x1, y1, x2, y2, width = 0.5, lum = 0, kind = 1) {
-    if (this.n >= MAX_SEGMENTS) return;
+    if (this.n >= MAX_SEGMENTS || this.frozen) return;
     const dx = x2 - x1;
     const dy = y2 - y1;
     if (dx * dx + dy * dy < MIN_LEN * MIN_LEN) return;
@@ -56,6 +56,52 @@ export class SnapIndex {
     }
   }
 
+  /**
+   * Pack the grid into flat typed arrays once building is done. A sheet can have hundreds of
+   * thousands of segments; thousands of small JS arrays cost far more memory than this.
+   */
+  freeze() {
+    if (this.frozen) return;
+    let minx = Infinity,
+      miny = Infinity,
+      maxx = -Infinity,
+      maxy = -Infinity,
+      total = 0;
+    for (const [k, arr] of this.grid) {
+      const cx = Math.floor(k / 65536) - 1024,
+        cy = (k % 65536) - 1024;
+      if (cx < minx) minx = cx;
+      if (cy < miny) miny = cy;
+      if (cx > maxx) maxx = cx;
+      if (cy > maxy) maxy = cy;
+      total += arr.length;
+    }
+    if (!isFinite(minx)) minx = miny = maxx = maxy = 0;
+    const cols = maxx - minx + 1,
+      rows = maxy - miny + 1;
+    const start = new Int32Array(cols * rows + 1);
+    for (const [k, arr] of this.grid) {
+      const cx = Math.floor(k / 65536) - 1024 - minx,
+        cy = (k % 65536) - 1024 - miny;
+      start[cy * cols + cx + 1] = arr.length;
+    }
+    for (let i = 1; i < start.length; i++) start[i] += start[i - 1];
+    const items = new Int32Array(total);
+    for (const [k, arr] of this.grid) {
+      const cx = Math.floor(k / 65536) - 1024 - minx,
+        cy = (k % 65536) - 1024 - miny;
+      items.set(arr, start[cy * cols + cx]);
+    }
+    this.packed = { minx, miny, cols, rows, start, items };
+    this.grid = null;
+    // trim attribute arrays to size
+    this.seg = this.seg.slice(0, this.n * 4);
+    this.width = this.width.slice(0, this.n);
+    this.lum = this.lum.slice(0, this.n);
+    this.kind = this.kind.slice(0, this.n);
+    this.frozen = true;
+  }
+
   /** Segment ids whose cells fall within r of p. */
   near(p, r) {
     const out = new Set();
@@ -63,6 +109,15 @@ export class SnapIndex {
     const x1 = Math.floor((p[0] + r) / CELL);
     const y0 = Math.floor((p[1] - r) / CELL);
     const y1 = Math.floor((p[1] + r) / CELL);
+    if (this.packed) {
+      const { minx, miny, cols, rows, start, items } = this.packed;
+      for (let cy = Math.max(y0, miny); cy <= Math.min(y1, miny + rows - 1); cy++)
+        for (let cx = Math.max(x0, minx); cx <= Math.min(x1, minx + cols - 1); cx++) {
+          const c = (cy - miny) * cols + (cx - minx);
+          for (let i = start[c]; i < start[c + 1]; i++) out.add(items[i]);
+        }
+      return out;
+    }
     for (let cx = x0; cx <= x1; cx++)
       for (let cy = y0; cy <= y1; cy++) {
         const arr = this.grid.get(cellKey(cx, cy));
@@ -78,7 +133,8 @@ export class SnapIndex {
   }
 }
 
-const cellKey = (x, y) => x + ',' + y;
+// Numeric cell keys (cells span roughly -1000..64000 in either axis).
+const cellKey = (x, y) => (x + 1024) * 65536 + (y + 1024);
 
 // ---------- Geometry extraction from a PDF.js page ----------
 

@@ -1,6 +1,7 @@
 // PDF loading, page rendering, pan/zoom transform and thumbnails.
 import * as pdfjs from '../vendor/pdfjs/pdf.min.mjs';
 import { buildSnapIndex } from './snap.js';
+import { clearFillCache } from './fill.js';
 
 const BASE = new URL('../vendor/pdfjs/', import.meta.url).href;
 pdfjs.GlobalWorkerOptions.workerSrc = BASE + 'pdf.worker.min.mjs';
@@ -21,7 +22,6 @@ export const view = {
 let canvas, stage, viewportEl, onChange;
 let renderTask = null;
 let renderTimer = null;
-let renderedZoom = 0;
 let renderSeq = 0;
 
 export function initViewer({ canvasEl, stageEl, viewport, onViewChange }) {
@@ -63,6 +63,12 @@ export async function loadDocument(docId, bytes) {
     labels = null;
   }
   return { numPages: pdf.numPages, labels };
+}
+
+/** The PDF's bytes, straight from PDF.js (so Gridline doesn't keep a second copy in memory). */
+export async function documentBytes(docId) {
+  const pdf = docs.get(docId);
+  return pdf ? await pdf.getData() : null;
 }
 
 export function unloadDocument(docId) {
@@ -197,11 +203,18 @@ export async function pageSize(pageKey) {
 export async function showPage(pageKey) {
   const page = await getPage(pageKey);
   const vp = page.getViewport({ scale: 1 });
+  const prev = view.pageKey;
   view.pageKey = pageKey;
   view.pageW = vp.width;
   view.pageH = vp.height;
-  renderedZoom = 0;
+  rendered = null;
   fit();
+  // Let PDF.js drop the drawing data of the sheet we left (it reloads on demand).
+  if (prev && prev !== pageKey && pageCache.has(prev)) {
+    try {
+      pageCache.get(prev).cleanup();
+    } catch {}
+  }
 }
 
 export function fit() {
@@ -248,18 +261,50 @@ export function toScreen(p) {
   return [p[0] * view.zoom + view.x, p[1] * view.zoom + view.y];
 }
 
+// What the canvas currently shows, in page points (the whole sheet, or just the part around
+// the view when zoomed in far enough that a full-sheet bitmap would be huge).
+let rendered = null; // { zoom, rx, ry, rw, rh, partial }
+const FULL_LIMIT = 12e6; // pixels: above this, render only the visible area
+const PART_LIMIT = 20e6;
+
+function placeCanvas() {
+  const z = view.zoom;
+  const r = rendered || { rx: 0, ry: 0, rw: view.pageW, rh: view.pageH };
+  canvas.style.left = r.rx * z + 'px';
+  canvas.style.top = r.ry * z + 'px';
+  canvas.style.width = r.rw * z + 'px';
+  canvas.style.height = r.rh * z + 'px';
+}
+
+function visibleRect() {
+  const r = viewportEl.getBoundingClientRect();
+  const x0 = -view.x / view.zoom,
+    y0 = -view.y / view.zoom;
+  return [x0, y0, r.width / view.zoom, r.height / view.zoom];
+}
+
+function needsRender() {
+  if (!rendered || Math.abs(rendered.zoom - view.zoom) > 1e-6) return true;
+  if (!rendered.partial) return false;
+  const [x, y, w, h] = visibleRect();
+  const cx0 = Math.max(0, x),
+    cy0 = Math.max(0, y),
+    cx1 = Math.min(view.pageW, x + w),
+    cy1 = Math.min(view.pageH, y + h);
+  return cx0 < rendered.rx - 0.5 || cy0 < rendered.ry - 0.5 || cx1 > rendered.rx + rendered.rw + 0.5 || cy1 > rendered.ry + rendered.rh + 0.5;
+}
+
 function apply(immediateRender = false, panOnly = false) {
   const w = view.pageW * view.zoom;
   const h = view.pageH * view.zoom;
   stage.style.width = w + 'px';
   stage.style.height = h + 'px';
   stage.style.transform = `translate(${Math.round(view.x)}px, ${Math.round(view.y)}px)`;
-  canvas.style.width = w + 'px';
-  canvas.style.height = h + 'px';
-  if (!panOnly) {
+  placeCanvas();
+  if (!panOnly || needsRender()) {
     clearTimeout(renderTimer);
     if (immediateRender) render();
-    else renderTimer = setTimeout(render, 140);
+    else renderTimer = setTimeout(render, panOnly ? 60 : 140);
   }
   onChange && onChange(panOnly ? 'pan' : 'zoom');
 }
@@ -268,19 +313,32 @@ async function render() {
   if (!view.pageKey) return;
   const key = view.pageKey;
   const zoom = view.zoom;
-  if (Math.abs(renderedZoom - zoom) < 1e-6 && canvas.width) return;
+  if (!needsRender() && canvas.width) return;
   const seq = ++renderSeq;
   const page = await getPage(key);
   if (seq !== renderSeq) return;
 
-  // Cap the backing store so huge zooms stay responsive (sharpness tops out, CSS scales the rest).
   const dpr = window.devicePixelRatio || 1;
   let s = zoom * dpr;
-  const MAX_PIXELS = 48e6;
   const MAX_SIDE = 16384;
-  const pix = view.pageW * view.pageH * s * s;
-  if (pix > MAX_PIXELS) s *= Math.sqrt(MAX_PIXELS / pix);
-  s = Math.min(s, MAX_SIDE / view.pageW, MAX_SIDE / view.pageH);
+  let rx = 0,
+    ry = 0,
+    rw = view.pageW,
+    rh = view.pageH,
+    partial = false;
+  if (view.pageW * view.pageH * s * s > FULL_LIMIT) {
+    // Zoomed in: render the visible area plus half a screen of margin each way.
+    const [x, y, w, h] = visibleRect();
+    rx = Math.max(0, x - w * 0.5);
+    ry = Math.max(0, y - h * 0.5);
+    rw = Math.min(view.pageW, x + w * 1.5) - rx;
+    rh = Math.min(view.pageH, y + h * 1.5) - ry;
+    partial = rw < view.pageW - 0.5 || rh < view.pageH - 0.5;
+    const pix = rw * rh * s * s;
+    if (pix > PART_LIMIT) s *= Math.sqrt(PART_LIMIT / pix);
+  }
+  s = Math.min(s, MAX_SIDE / rw, MAX_SIDE / rh);
+  if (rw <= 0 || rh <= 0) return;
 
   const vp = page.getViewport({ scale: s });
   if (renderTask) {
@@ -289,12 +347,18 @@ async function render() {
     } catch {}
   }
   const off = document.createElement('canvas');
-  off.width = Math.floor(vp.width);
-  off.height = Math.floor(vp.height);
+  off.width = Math.max(1, Math.floor(rw * s));
+  off.height = Math.max(1, Math.floor(rh * s));
   const ctx = off.getContext('2d', { alpha: false });
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, off.width, off.height);
-  renderTask = page.render({ canvasContext: ctx, canvas: off, viewport: vp, annotationMode: pdfjs.AnnotationMode.ENABLE });
+  renderTask = page.render({
+    canvasContext: ctx,
+    canvas: off,
+    viewport: vp,
+    transform: partial || rx || ry ? [1, 0, 0, 1, -rx * s, -ry * s] : null,
+    annotationMode: pdfjs.AnnotationMode.ENABLE,
+  });
   try {
     await renderTask.promise;
   } catch (e) {
@@ -302,33 +366,57 @@ async function render() {
     console.error(e);
     return;
   }
-  if (seq !== renderSeq || key !== view.pageKey) return;
-  // Swap in the finished frame in one step so there is no flash while zooming.
-  canvas.width = off.width;
-  canvas.height = off.height;
-  canvas.getContext('2d').drawImage(off, 0, 0);
-  renderedZoom = zoom;
+  if (seq !== renderSeq || key !== view.pageKey) {
+    off.width = off.height = 0;
+    return;
+  }
+  // Swap the finished frame in (no copy, no flash); the old bitmap is released right away.
+  off.id = canvas.id;
+  canvas.replaceWith(off);
+  canvas.width = canvas.height = 0;
+  canvas = off;
+  rendered = { zoom, rx, ry, rw, rh, partial };
+  placeCanvas();
+  if (needsRender()) {
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(render, 60);
+  }
 }
 
 export function clearCanvas() {
   view.pageKey = null;
   view.pageW = view.pageH = 0;
   canvas.width = canvas.height = 0;
+  rendered = null;
   renderSeq++;
 }
 
 // ---- Snap geometry (built once per sheet, in the background) ----
-const snapCache = new Map(); // pageKey -> Promise<SnapIndex|null>
+const snapCache = new Map(); // pageKey -> Promise<SnapIndex|null>  (most recent last)
+const SNAP_KEEP = 4;
 
 export function getSnapIndex(pageKey) {
-  if (!snapCache.has(pageKey)) {
+  if (snapCache.has(pageKey)) {
+    const v = snapCache.get(pageKey);
+    snapCache.delete(pageKey);
+    snapCache.set(pageKey, v);
+    return v;
+  }
+  while (snapCache.size >= SNAP_KEEP) {
+    const oldest = snapCache.keys().next().value;
+    snapCache.delete(oldest);
+    clearFillCache(oldest + '|');
+  }
+  {
     snapCache.set(
       pageKey,
       (async () => {
         try {
           const page = await getPage(pageKey);
           const vp = page.getViewport({ scale: 1 });
-          return await buildSnapIndex(page, pdfjs.OPS, vp.transform);
+          const idx = await buildSnapIndex(page, pdfjs.OPS, vp.transform);
+          idx.freeze();
+          return idx;
         } catch (e) {
           console.warn('snap geometry unavailable', e);
           return null;

@@ -53,6 +53,16 @@ export const store = {
 const undoStack = [];
 const redoStack = [];
 const HISTORY_MAX = 150;
+// Big takeoffs make big snapshots; cap undo history by size as well as count.
+const HISTORY_BYTES = 24 * 1024 * 1024;
+const size = (arr) => arr.reduce((n, s) => n + s.length * 2, 0);
+let trimmed = 0; // entries dropped from the front, so history marks stay valid
+function trimHistory() {
+  while (undoStack.length > 1 && (undoStack.length > HISTORY_MAX || size(undoStack) + size(redoStack) > HISTORY_BYTES)) {
+    undoStack.shift();
+    trimmed++;
+  }
+}
 
 function snapshot() {
   const { conditions, markups, pages, settings, unit, name } = store.project;
@@ -68,8 +78,8 @@ function restore(snap) {
 /** Wrap every user-visible mutation in commit() so it can be undone. */
 export function commit(mutator, what = 'change') {
   undoStack.push(snapshot());
-  if (undoStack.length > HISTORY_MAX) undoStack.shift();
   redoStack.length = 0;
+  trimHistory();
   mutator(store.project);
   markDirty();
   emit(what);
@@ -124,14 +134,15 @@ export function nextColor() {
 
 /** Position in the undo history, for grouping several commits into one step. */
 export function historyMark() {
-  return undoStack.length;
+  return trimmed + undoStack.length;
 }
 
 /** Collapse every commit made since `mark` into a single undo step. Returns true if anything changed. */
 export function squashHistory(mark) {
-  if (undoStack.length <= mark) return false;
-  const first = undoStack[mark];
-  undoStack.length = mark;
+  const at = Math.max(0, mark - trimmed);
+  if (undoStack.length <= at) return false;
+  const first = undoStack[at];
+  undoStack.length = at;
   undoStack.push(first);
   return true;
 }

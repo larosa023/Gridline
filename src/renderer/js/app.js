@@ -221,7 +221,8 @@ async function addPdfFiles(files) {
       toast(`Couldn't open ${f.name}. Is it a valid PDF?`, { kind: 'err' });
       continue;
     }
-    store.project.documents.push({ id, name: f.name.replace(/\.pdf$/i, ''), data: toBase64(f.data) });
+    // The PDF bytes live in PDF.js; they're read back only when saving.
+    store.project.documents.push({ id, name: f.name.replace(/\.pdf$/i, '') });
     for (let n = 1; n <= info.numPages; n++) {
       const key = `${id}:${n}`;
       const label = info.labels && info.labels[n - 1];
@@ -404,6 +405,7 @@ async function openProject(path) {
   for (const d of store.project.documents) {
     try {
       await viewer.loadDocument(d.id, fromBase64(d.data));
+      delete d.data; // now held by PDF.js; re-encoded on save
     } catch (e) {
       console.error(e);
       toast(`Drawing "${d.name}" couldn't be loaded.`, { kind: 'err' });
@@ -418,7 +420,22 @@ async function openProject(path) {
 }
 
 async function saveProject(saveAs = false) {
-  const text = JSON.stringify(store.project);
+  let text;
+  try {
+    const documents = [];
+    for (const d of store.project.documents) {
+      if (d.data) documents.push(d); // a drawing that failed to load keeps its original data
+      else {
+        const bytes = await viewer.documentBytes(d.id);
+        if (!bytes) throw new Error(`Drawing "${d.name}" isn't loaded`);
+        documents.push({ ...d, data: toBase64(bytes) });
+      }
+    }
+    text = JSON.stringify({ ...store.project, documents });
+  } catch (e) {
+    toast('Save failed: ' + (e.message || e), { kind: 'err' });
+    return false;
+  }
   try {
     const p = await api.saveProject({ text, path: store.filePath, name: store.project.name, saveAs });
     if (p === null && !api.__shim) return false;
@@ -1513,4 +1530,4 @@ async function installUpdate() {
 }
 
 // Expose a tiny hook for automated smoke tests.
-window.__gridline = { store, view, addPdfFiles, setTool, goToPage, newCondition, setView, menuCmd };
+window.__gridline = { store, view, viewer, addPdfFiles, setTool, goToPage, newCondition, setView, menuCmd };
