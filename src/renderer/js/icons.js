@@ -32,6 +32,9 @@ const P = {
   chevronL: '<path d="M15 6l-6 6 6 6"/>',
   chevronR: '<path d="M9 6l6 6-6 6"/>',
   minus: '<path d="M5 12h14"/>',
+  roof: '<path d="M2 12L12 4l10 8"/><path d="M5 10v9h14v-9"/><path d="M9 19v-5h6v5"/>',
+  magnet: '<path d="M6 3v8a6 6 0 0012 0V3"/><path d="M6 7h4M14 7h4"/><path d="M10 3v8a2 2 0 004 0V3"/>',
+  caret: '<path d="M7 10l5 5 5-5"/>',
   tag: '<path d="M3 12V4a1 1 0 011-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.5"/>',
 };
 

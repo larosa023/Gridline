@@ -92,7 +92,12 @@ export function contextMenu(x, y, items) {
       m.append(h('<hr>'));
       continue;
     }
-    const b = h(`<button class="${it.danger ? 'danger' : ''}">${it.icon ? icon(it.icon, 15) : ''}<span>${esc(it.label)}</span></button>`);
+    if (it.head) {
+      m.append(h(`<div class="menu-head">${esc(it.head)}</div>`));
+      continue;
+    }
+    const lead = it.dot ? `<span class="dot" style="background:${esc(it.dot)}"></span>` : it.icon ? icon(it.icon, 15) : '';
+    const b = h(`<button class="${it.danger ? 'danger' : ''} ${it.current ? 'current' : ''}">${lead}<span>${esc(it.label)}</span></button>`);
     b.onclick = () => {
       closeContextMenu();
       it.run();

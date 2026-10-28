@@ -15,7 +15,7 @@ export function initEstimate(a) {
 export function computeLines() {
   return store.project.conditions.map((c) => {
     const t = totalsFor(c);
-    return { c, t, ...priceLine(c, t) };
+    return { c, t, ...priceLine({ ...c, unit: store.project.unit }, t) };
   });
 }
 
@@ -38,15 +38,15 @@ export function renderEstimate() {
     rows += `<tr class="group"><td colspan="9">${esc(g)}</td><td class="num">${fmtMoney(gt)}</td></tr>`;
     for (const l of ls) {
       const c = l.c;
-      const opts = costBasisOptions(c);
+      const opts = costBasisOptions({ ...c, unit: p.unit });
       const unit = basisUnit(l.basis, p.unit);
       rows += `<tr class="line" data-id="${c.id}">
         <td><div class="name-cell"><span class="dot" style="background:${c.color}"></span><input class="wide" data-f="name" value="${esc(c.name)}" /></div></td>
         <td class="muted">${TYPE_INFO[c.type].label}</td>
         <td class="num">${
           opts.length > 1
-            ? `<select data-f="costBasis">${opts.map((o) => `<option value="${o}" ${o === l.basis ? 'selected' : ''}>${basisLabel(o)}</option>`).join('')}</select>`
-            : basisLabel(l.basis)
+            ? `<select data-f="costBasis">${opts.map((o) => `<option value="${o}" ${o === l.basis ? 'selected' : ''}>${basisLabel(o, c)}</option>`).join('')}</select>`
+            : basisLabel(l.basis, c)
         }</td>
         <td class="num">${fmtNum(l.qty, 2)}</td>
         <td class="num"><input data-f="waste" type="number" step="any" min="0" value="${c.waste || 0}" style="width:56px" />%</td>
@@ -128,7 +128,7 @@ export function estimateCsv() {
       l.c.group || '',
       l.c.name,
       TYPE_INFO[l.c.type].label,
-      basisLabel(l.basis),
+      basisLabel(l.basis, l.c),
       r2(l.qty),
       basisUnit(l.basis, p.unit),
       l.c.waste || 0,

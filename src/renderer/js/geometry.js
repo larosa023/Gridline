@@ -1,4 +1,5 @@
 // Pure geometry + quantity math. Points are [x, y] in PDF points.
+import { slopeFactor, hipFactor } from './units.js';
 
 export const dist = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
 
@@ -88,36 +89,58 @@ export function pointInPolygon(p, pts) {
   return inside;
 }
 
+/** Effective pitch for a markup: its own override, else its condition's. */
+export function markupPitch(m, cond) {
+  const own = m && m.pitch != null && m.pitch !== '' ? +m.pitch : NaN;
+  if (isFinite(own)) return own;
+  return cond && isFinite(+cond.pitch) ? +cond.pitch : 0;
+}
+
 /**
- * Raw (unscaled-to-cost) quantities of one markup, in real units.
- * scale: { ptPerUnit, unit }
+ * Raw quantities of one markup, in real units.
+ * scale: { ptPerUnit, unit }. cond (optional) supplies pitch / roof-line settings.
  */
-export function markupQuantities(m, scale) {
+export function markupQuantities(m, scale, cond) {
   const k = scale && scale.ptPerUnit ? scale.ptPerUnit : null;
   if (m.type === 'count') return { count: m.points.length };
   if (!k) return { unscaled: true };
   if (m.type === 'linear') {
-    return { length: polylineLength(m.points) / k, segments: Math.max(0, m.points.length - 1) };
+    let length = polylineLength(m.points) / k;
+    const planLength = length;
+    const pitch = markupPitch(m, cond);
+    if (cond && cond.roofLine === 'rake' && pitch) length *= slopeFactor(pitch);
+    if (cond && cond.roofLine === 'hip' && pitch) length *= hipFactor(pitch);
+    return { length, planLength, segments: Math.max(0, m.points.length - 1) };
   }
-  if (m.type === 'area') {
-    const area = polygonArea(m.points) / (k * k);
-    return { area: m.deduct ? -area : area, perimeter: polygonPerimeter(m.points) / k };
+  if (m.type === 'area' || m.type === 'roof') {
+    const sign = m.deduct ? -1 : 1;
+    const plan = (polygonArea(m.points) / (k * k)) * sign;
+    const q = { area: plan, perimeter: polygonPerimeter(m.points) / k };
+    if (m.type === 'roof') {
+      const pitch = markupPitch(m, cond);
+      q.pitch = pitch;
+      q.planArea = plan;
+      q.area = plan * slopeFactor(pitch);
+      q.squares = q.area / 100;
+    }
+    return q;
   }
   return {};
 }
 
 /**
  * Roll up a condition's markups into its derived quantities.
- * Linear: length (LF), wall area if height set (SF).
- * Area: area (SF), perimeter (LF), volume if depth (in) set (CY), plus perimeter x height.
+ * Linear: length (LF; true length for rake/hip lines), wall area if height set (SF).
+ * Area: area (SF), perimeter (LF), volume if depth (in) set (CY), perimeter x height.
+ * Roof: planArea (SF), area = sloped roof area (SF), squares (SQ), perimeter (LF).
  * Count: count (EA).
  */
 export function conditionTotals(cond, markups, scaleFor) {
-  const t = { length: 0, area: 0, perimeter: 0, count: 0, volume: 0, unscaled: 0, markups: 0 };
+  const t = { length: 0, area: 0, perimeter: 0, count: 0, volume: 0, planArea: 0, squares: 0, unscaled: 0, markups: 0 };
   for (const m of markups) {
     if (m.conditionId !== cond.id) continue;
     t.markups++;
-    const q = markupQuantities(m, scaleFor(m.pageKey));
+    const q = markupQuantities(m, scaleFor(m.pageKey), cond);
     if (q.unscaled) {
       t.unscaled++;
       continue;
@@ -126,6 +149,8 @@ export function conditionTotals(cond, markups, scaleFor) {
     t.area += q.area || 0;
     t.perimeter += q.perimeter || 0;
     t.count += q.count || 0;
+    t.planArea += q.planArea || 0;
+    t.squares += q.squares || 0;
   }
   const metric = cond.unit === 'm';
   const h = +cond.height || 0;
@@ -137,6 +162,7 @@ export function conditionTotals(cond, markups, scaleFor) {
     }
     if (h) t.wallArea = t.perimeter * h;
   }
+  if (cond.type === 'roof' && metric) t.squares = 0;
   return t;
 }
 
@@ -149,6 +175,7 @@ export function costBasisOptions(cond) {
     if (cond.height) o.push('wallArea');
     return o;
   }
+  if (cond.type === 'roof') return cond.unit === 'm' ? ['area', 'planArea', 'perimeter'] : ['squares', 'area', 'planArea', 'perimeter'];
   return ['count'];
 }
 
@@ -159,18 +186,28 @@ export function basisUnit(basis, unit = 'ft') {
       length: metric ? 'm' : 'LF',
       perimeter: metric ? 'm' : 'LF',
       area: metric ? 'm²' : 'SF',
+      planArea: metric ? 'm²' : 'SF',
       wallArea: metric ? 'm²' : 'SF',
       volume: metric ? 'm³' : 'CY',
+      squares: 'SQ',
       count: 'EA',
     }[basis] || ''
   );
 }
 
-export function basisLabel(basis) {
+export function basisLabel(basis, cond) {
+  if (basis === 'area' && cond && cond.type === 'roof') return 'Roof area';
   return (
-    { length: 'Length', perimeter: 'Perimeter', area: 'Area', wallArea: 'Wall area', volume: 'Volume', count: 'Count' }[
-      basis
-    ] || basis
+    {
+      length: 'Length',
+      perimeter: 'Perimeter',
+      area: 'Area',
+      planArea: 'Plan area',
+      wallArea: 'Wall area',
+      volume: 'Volume',
+      squares: 'Squares',
+      count: 'Count',
+    }[basis] || basis
   );
 }
 

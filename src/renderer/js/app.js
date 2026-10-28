@@ -2,7 +2,9 @@
 import { store, commit, undo, redo, on, emit, uid, blankProject, resetHistory, markDirty, condition, nextColor } from './store.js';
 import * as viewer from './viewer.js';
 import { view } from './viewer.js';
-import { initOverlay, drawOverlay, scaleFor, lengthLabel, areaLabel } from './overlay.js';
+import { initOverlay, drawOverlay, drawSnapLayer, scaleFor, lengthLabel, areaLabel, lineFactor } from './overlay.js';
+import { findSnap } from './snap.js';
+import { markupPitch } from './geometry.js';
 import { initPanels, renderSheets, renderConditions, renderInspector, markSheetActive } from './panels.js';
 import { initEstimate, renderEstimate, estimateCsv } from './estimate.js';
 import { conditionDialog, calibrateDialog, scaleOptionsHtml, presetToScale, shortcutsDialog, aboutDialog, TYPE_INFO } from './dialogs.js';
@@ -45,10 +47,17 @@ function download(text, name) {
 let draft = null; // shape being drawn: { type, points, hover, color }
 let measure = null; // quick-measure: { points: [] }
 let manualCheck = false;
+let snapOn = localStorage.getItem('gridline-snap') !== 'off';
+let snapIndex = null; // line geometry of the current sheet
+let snapHit = null; // current snap target, shown as a marker
+const DRAW_TOOLS = ['linear', 'area', 'roof', 'count', 'measure', 'calibrate'];
+const TAKEOFF_TOOLS = ['linear', 'area', 'roof', 'count'];
+const SNAP_TOOLS = ['linear', 'area', 'roof', 'measure', 'calibrate'];
 const vpEl = $('#viewport');
 hydrateIcons();
 viewer.initViewer({ canvasEl: $('#pdfCanvas'), stageEl: $('#stage'), viewport: vpEl, onViewChange });
-initOverlay($('#overlay'));
+initOverlay($('#overlay'), $('#snapLayer'));
+store.ui.lastByType = {};
 const panelActions = {
   goToPage,
   removeDocument,
@@ -87,14 +96,19 @@ function refresh(what = 'all') {
   renderConditions();
   renderInspector();
   updateToolbar();
-  drawOverlay(draft, measure);
+  redraw();
   if (store.ui.view === 'estimate') renderEstimate();
   $('#emptyState').hidden = !!p.documents.length;
   $('#pageNav').hidden = !store.ui.pageKey;
 }
 
-function onViewChange() {
+function redraw() {
   drawOverlay(draft, measure);
+  drawSnapLayer(snapHit);
+}
+
+function onViewChange() {
+  redraw();
   $('#zoomReadout').textContent = Math.round(view.zoom * 100) + '%';
 }
 
@@ -102,7 +116,10 @@ function updateToolbar() {
   const p = store.project;
   $$('#toolGroup .tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === store.ui.tool));
   $('#btnCalibrate').classList.toggle('active', store.ui.tool === 'calibrate');
-  vpEl.className = 'viewport ' + (store.ui.tool === 'pan' ? 'tool-pan' : ['linear', 'area', 'count', 'measure', 'calibrate'].includes(store.ui.tool) ? 'tool-draw' : '');
+  vpEl.className = 'viewport ' + (store.ui.tool === 'pan' ? 'tool-pan' : DRAW_TOOLS.includes(store.ui.tool) ? 'tool-draw' : '');
+  const snapBtn = $('#btnSnap');
+  snapBtn.classList.toggle('on', snapOn);
+  snapBtn.title = `Snap to plan lines: ${snapOn ? 'ON' : 'OFF'} (S) — hold Ctrl to bypass`;
 
   const c = condition(store.ui.activeConditionId);
   $('#activeCond').innerHTML = c ? `<div class="swatch" style="background:${c.color}">${icon(TYPE_INFO[c.type].icon, 13)}</div><span title="${esc(c.name)}">${esc(c.name)}</span>` : '';
@@ -113,13 +130,13 @@ function updateToolbar() {
   sel.disabled = !pg;
   sel.classList.toggle('unset', !!pg && !pg.scale);
   $('#btnCalibrate').disabled = !pg;
-  $('#scaleBanner').hidden = !(pg && !pg.scale && ['linear', 'area', 'measure'].includes(store.ui.tool));
+  $('#scaleBanner').hidden = !(pg && !pg.scale && ['linear', 'area', 'roof', 'measure'].includes(store.ui.tool));
   $('#statusScale').textContent = pg ? (pg.scale ? 'Scale: ' + pg.scale.label : 'Scale: not set') : '';
 
   const keys = orderedPageKeys();
   const i = keys.indexOf(store.ui.pageKey);
   $('#pageNavLabel').textContent = pg ? `${pg.name} · ${i + 1} / ${keys.length}` : '';
-  $('#statusCursor').textContent = '';
+  $('#statusCursor').textContent = snapOn ? 'Snap on' : 'Snap off';
   $('#statusHint').textContent = toolHint();
   $$('.seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === store.ui.view));
 }
@@ -131,8 +148,9 @@ function toolHint() {
     {
       select: 'Click a markup to select it · drag handles to edit · Del to delete',
       pan: 'Drag to pan · wheel to zoom',
-      linear: draft ? 'Click to add points · Enter / double-click to finish · Backspace undoes a point · Shift snaps' : 'Click to start a linear run',
-      area: draft ? 'Click to add corners · Enter / double-click to close · hold Alt to finish as a deduction' : 'Click to start an area',
+      linear: draft ? 'Click to add points · Enter / double-click to finish · Backspace undoes a point · Shift for 90°' : 'Click to start a linear run · Tab flips to Area',
+      area: draft ? 'Click to add corners · Enter / double-click to close · hold Alt to finish as a deduction' : 'Click to start an area · Tab flips to Linear',
+      roof: draft ? 'Trace the roof outline in plan · Enter to close · hold Alt for a deduction (skylight, chimney)' : 'Trace a roof plane in plan view — pitch converts it to true roof area',
       count: 'Click to place counts · Esc when done',
       measure: 'Click two points to measure',
       calibrate: 'Click both ends of a known dimension',
@@ -351,6 +369,11 @@ async function goToPage(key) {
   measure = null;
   store.ui.pageKey = key;
   store.ui.selectedMarkupId = null;
+  snapIndex = null;
+  snapHit = null;
+  viewer.getSnapIndex(key).then((idx) => {
+    if (store.ui.pageKey === key) snapIndex = idx;
+  });
   try {
     await viewer.showPage(key);
   } catch (e) {
@@ -397,7 +420,7 @@ function copyScaleToAll(fromKey, onlyUnscaled = false) {
 async function finishCalibration(points) {
   const ptLen = dist(points[0], points[1]);
   draft = null;
-  drawOverlay(null, measure);
+  redraw();
   if (ptLen < 2) return setTool('select');
   const r = await calibrateDialog(ptLen);
   setTool('select');
@@ -463,6 +486,7 @@ function activateCondition(id) {
   const c = condition(id);
   if (!c) return;
   store.ui.activeConditionId = id;
+  store.ui.lastByType[c.type] = id;
   store.ui.hiddenConditions.delete(id);
   store.ui.selectedMarkupId = null;
   setTool(c.type, true);
@@ -471,13 +495,16 @@ function activateCondition(id) {
 // ---------- Tools ----------
 async function setTool(tool, fromCondition = false) {
   cancelDraft();
+  snapHit = null;
   if (tool !== 'measure') measure = null;
-  if (['linear', 'area', 'count'].includes(tool) && !fromCondition) {
+  if (TAKEOFF_TOOLS.includes(tool) && !fromCondition) {
     const c = condition(store.ui.activeConditionId);
     if (!c || c.type !== tool) {
-      // Reuse the most recent condition of that type, or create one.
-      const existing = [...store.project.conditions].reverse().find((x) => x.type === tool);
+      // Quick toggle: go back to the last condition used with this tool, then the newest one.
+      const last = condition(store.ui.lastByType[tool]);
+      const existing = last && last.type === tool ? last : [...store.project.conditions].reverse().find((x) => x.type === tool);
       if (existing) return activateCondition(existing.id);
+      if (tool === 'linear' || tool === 'area') return quickCreate(tool);
       const created = await newCondition(tool);
       if (!created) {
         store.ui.tool = 'select';
@@ -486,7 +513,7 @@ async function setTool(tool, fromCondition = false) {
       return;
     }
   }
-  if (['linear', 'area', 'count', 'measure', 'calibrate'].includes(tool) && !store.ui.pageKey) {
+  if (DRAW_TOOLS.includes(tool) && !store.ui.pageKey) {
     store.ui.tool = 'select';
     refresh('ui');
     return toast('Add drawings first.');
@@ -497,12 +524,45 @@ async function setTool(tool, fromCondition = false) {
   vpEl.focus();
 }
 
+/** Start measuring immediately with a plain condition — no dialog. */
+function quickCreate(type) {
+  const base = type === 'linear' ? 'Linear' : 'Area';
+  let n = 1;
+  while (store.project.conditions.some((c) => c.name === `${base} ${n}`)) n++;
+  const c = { id: uid('cond'), name: `${base} ${n}`, type, color: nextColor(), group: '', height: 0, depth: 0, pitch: 0, roofLine: '', waste: 0, matCost: 0, laborCost: 0, costBasis: null, notes: '' };
+  commit((p) => p.conditions.push(c), 'conditions');
+  activateCondition(c.id);
+  toast(`Measuring "${c.name}". Rename it or add costs anytime.`, { action: () => editCondition(c.id), actionLabel: 'Edit', timeout: 3500 });
+}
+
+function pickCondition(type, anchor) {
+  const r = anchor.getBoundingClientRect();
+  const list = store.project.conditions.filter((c) => c.type === type);
+  const items = [{ head: type === 'linear' ? 'Linear conditions' : 'Area conditions' }];
+  for (const c of list) items.push({ label: c.name, dot: c.color, current: c.id === store.ui.activeConditionId, run: () => activateCondition(c.id) });
+  if (list.length) items.push('-');
+  items.push({ label: `Quick ${type === 'linear' ? 'linear' : 'area'} (no setup)`, icon: 'plus', run: () => quickCreate(type) });
+  items.push({ label: `New ${type} condition…`, icon: 'tag', run: () => newCondition(type) });
+  contextMenu(r.left, r.bottom + 4, items);
+}
+
+function toggleSnap() {
+  snapOn = !snapOn;
+  localStorage.setItem('gridline-snap', snapOn ? 'on' : 'off');
+  snapHit = null;
+  redraw();
+  updateToolbar();
+  toast(snapOn ? 'Snap to plan lines on' : 'Snap off', { timeout: 1200 });
+}
+
 function cancelDraft() {
   draft = null;
   $('#hud').hidden = true;
 }
 
-$$('#toolGroup .tool').forEach((b) => (b.onclick = () => setTool(b.dataset.tool)));
+$$('#toolGroup [data-tool]').forEach((b) => (b.onclick = () => setTool(b.dataset.tool)));
+$$('#toolGroup [data-pick]').forEach((b) => (b.onclick = () => pickCondition(b.dataset.pick, b)));
+$('#btnSnap').onclick = toggleSnap;
 $('#btnCalibrate').onclick = () => setTool('calibrate');
 $('#bannerCalibrate').onclick = () => setTool('calibrate');
 
@@ -511,10 +571,24 @@ let drag = null; // { kind: 'pan'|'vertex'|'move', ... }
 let spaceDown = false;
 let lastClick = { t: 0, x: 0, y: 0 };
 
-function pagePoint(e, snapFrom) {
-  let p = viewer.toPage(e.clientX, e.clientY);
-  if (e.shiftKey && snapFrom) p = orthoSnap(snapFrom, p);
-  return p;
+/**
+ * Cursor -> page point. Shift locks to 45°/90° from `anchor`; otherwise, when snapping is
+ * on (and Ctrl isn't held), the point jumps to nearby plan geometry or existing markup vertices.
+ */
+function pagePoint(e, anchor, { snap = false, exclude = null } = {}) {
+  const raw = viewer.toPage(e.clientX, e.clientY);
+  snapHit = null;
+  if (e.shiftKey && anchor) return orthoSnap(anchor, raw);
+  if (!snap || !snapOn || e.ctrlKey) return raw;
+  const extra = [];
+  for (const m of store.project.markups) {
+    if (m.pageKey !== store.ui.pageKey || m === exclude || m.type === 'count' || store.ui.hiddenConditions.has(m.conditionId)) continue;
+    for (const q of m.points) extra.push(q);
+  }
+  if (draft && draft.points.length > 1) extra.push(draft.points[0]); // close back onto the start
+  const hit = findSnap(snapIndex, raw, 10 / view.zoom, extra);
+  snapHit = hit;
+  return hit ? hit.point : raw;
 }
 
 function hitTest(p) {
@@ -527,7 +601,7 @@ function hitTest(p) {
       if (m.points.some((q) => dist(p, q) <= tol)) return m;
     } else if (m.type === 'linear') {
       for (let j = 1; j < m.points.length; j++) if (distToSegment(p, m.points[j - 1], m.points[j]) <= tol) return m;
-    } else if (m.type === 'area') {
+    } else if (m.type === 'area' || m.type === 'roof') {
       if (pointInPolygon(p, m.points)) return m;
       const n = m.points.length;
       for (let j = 0; j < n; j++) if (distToSegment(p, m.points[j], m.points[(j + 1) % n]) <= tol) return m;
@@ -562,7 +636,7 @@ vpEl.addEventListener('pointerdown', (e) => {
     return;
   }
   if (e.button !== 0) return;
-  const p = pagePoint(e, draft && draft.points[draft.points.length - 1]);
+  const p = pagePoint(e, draft && draft.points[draft.points.length - 1], { snap: SNAP_TOOLS.includes(tool) });
 
   if (tool === 'select') {
     const sel = store.project.markups.find((m) => m.id === store.ui.selectedMarkupId);
@@ -597,7 +671,7 @@ vpEl.addEventListener('pointerdown', (e) => {
   const now = performance.now();
   const isDouble = now - lastClick.t < 320 && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 6;
   lastClick = { t: now, x: e.clientX, y: e.clientY };
-  if (isDouble && (tool === 'linear' || tool === 'area')) return;
+  if (isDouble && (tool === 'linear' || tool === 'area' || tool === 'roof')) return;
 
   const c = condition(store.ui.activeConditionId);
   if (tool === 'count') {
@@ -614,7 +688,7 @@ vpEl.addEventListener('pointerdown', (e) => {
       draft = null;
       $('#hud').hidden = true;
     }
-    drawOverlay(draft, measure);
+    redraw();
     return;
   }
   if (tool === 'calibrate') {
@@ -623,14 +697,14 @@ vpEl.addEventListener('pointerdown', (e) => {
       draft.points.push(p);
       return finishCalibration(draft.points);
     }
-    drawOverlay(draft, measure);
+    redraw();
     return;
   }
-  if (tool === 'linear' || tool === 'area') {
+  if (tool === 'linear' || tool === 'area' || tool === 'roof') {
     if (!c) return;
     if (!draft) draft = { type: tool, points: [], color: c.color };
     draft.points.push(p);
-    drawOverlay(draft, measure);
+    redraw();
     updateToolbar();
   }
 });
@@ -643,9 +717,9 @@ vpEl.addEventListener('pointermove', (e) => {
       drag.y = e.clientY;
     } else if (drag.kind === 'vertex') {
       const prev = drag.m.points[(drag.i - 1 + drag.m.points.length) % drag.m.points.length];
-      drag.m.points[drag.i] = pagePoint(e, prev);
+      drag.m.points[drag.i] = pagePoint(e, prev, { snap: true, exclude: drag.m });
       drag.moved = true;
-      drawOverlay(draft, measure);
+      redraw();
     } else if (drag.kind === 'move') {
       const p = viewer.toPage(e.clientX, e.clientY);
       const dx = p[0] - drag.start[0];
@@ -653,23 +727,27 @@ vpEl.addEventListener('pointermove', (e) => {
       if (!drag.moved && Math.hypot(dx, dy) * view.zoom < 3) return;
       drag.moved = true;
       drag.m.points = drag.orig.map(([x, y]) => [x + dx, y + dy]);
-      drawOverlay(draft, measure);
+      redraw();
     }
     return;
   }
   if (!view.pageKey) return;
   const hud = $('#hud');
   const r = vpEl.getBoundingClientRect();
+  const snapping = SNAP_TOOLS.includes(store.ui.tool);
   if (draft && draft.points.length) {
     const last = draft.points[draft.points.length - 1];
-    draft.hover = pagePoint(e, last);
+    draft.hover = pagePoint(e, last, { snap: snapping });
     const key = store.ui.pageKey;
+    const c = condition(store.ui.activeConditionId);
     let html;
-    if (draft.type === 'area') {
+    if (draft.type === 'area' || draft.type === 'roof') {
       const pts = [...draft.points, draft.hover];
-      html = `${pts.length >= 3 ? areaLabel(pts, key) : '—'}<small>Seg ${lengthLabel([last, draft.hover], key)}</small>`;
+      const pitch = draft.type === 'roof' ? markupPitch({}, c) : null;
+      html = `${pts.length >= 3 ? areaLabel(pts, key, pitch) : '—'}<small>Seg ${lengthLabel([last, draft.hover], key)}</small>`;
     } else if (draft.type === 'linear') {
-      html = `${lengthLabel([...draft.points, draft.hover], key)}<small>Seg ${lengthLabel([last, draft.hover], key)}</small>`;
+      const f = lineFactor(c);
+      html = `${lengthLabel([...draft.points, draft.hover], key, false, f)}<small>${f !== 1 ? 'True length · ' : ''}Seg ${lengthLabel([last, draft.hover], key, false, f)}</small>`;
     } else {
       html = `${lengthLabel([last, draft.hover], key)}`;
     }
@@ -677,9 +755,14 @@ vpEl.addEventListener('pointermove', (e) => {
     hud.style.left = e.clientX - r.left + 'px';
     hud.style.top = e.clientY - r.top + 'px';
     hud.hidden = false;
-    drawOverlay(draft, measure);
+    redraw();
   } else {
     hud.hidden = true;
+    if (snapping) {
+      const before = snapHit;
+      pagePoint(e, null, { snap: true });
+      if (before || snapHit) drawSnapLayer(snapHit);
+    }
   }
 });
 
@@ -699,7 +782,7 @@ vpEl.addEventListener('pointerup', (e) => {
 });
 
 vpEl.addEventListener('dblclick', (e) => {
-  if (draft && (draft.type === 'linear' || draft.type === 'area')) {
+  if (draft && (draft.type === 'linear' || draft.type === 'area' || draft.type === 'roof')) {
     e.preventDefault();
     finishDraft(e.altKey);
   }
@@ -707,7 +790,7 @@ vpEl.addEventListener('dblclick', (e) => {
 
 vpEl.addEventListener('contextmenu', (e) => {
   e.preventDefault();
-  if (draft && (draft.type === 'linear' || draft.type === 'area')) return finishDraft(e.altKey);
+  if (draft && (draft.type === 'linear' || draft.type === 'area' || draft.type === 'roof')) return finishDraft(e.altKey);
   if (!view.pageKey) return;
   const hit = hitTest(viewer.toPage(e.clientX, e.clientY));
   if (!hit) return;
@@ -717,7 +800,7 @@ vpEl.addEventListener('contextmenu', (e) => {
   refresh('ui');
   const others = store.project.conditions.filter((c) => c.type === hit.type && c.id !== hit.conditionId);
   const items = [];
-  if (hit.type === 'area') items.push({ label: hit.deduct ? 'Make additive' : 'Make deduction', icon: 'minus', run: () => commit(() => (hit.deduct = !hit.deduct), 'markups') });
+  if (hit.type === 'area' || hit.type === 'roof') items.push({ label: hit.deduct ? 'Make additive' : 'Make deduction', icon: 'minus', run: () => commit(() => (hit.deduct = !hit.deduct), 'markups') });
   for (const o of others.slice(0, 8)) items.push({ label: `Move to: ${o.name}`, icon: 'layers', run: () => commit(() => (hit.conditionId = o.id), 'markups') });
   if (items.length) items.push('-');
   items.push({ label: 'Delete markup', icon: 'trash', danger: true, run: deleteSelected });
@@ -729,15 +812,16 @@ function finishDraft(deduct = false) {
   const c = condition(store.ui.activeConditionId);
   // Drop duplicate trailing points (from double-click).
   const pts = draft.points.filter((p, i, a) => i === 0 || dist(p, a[i - 1]) > 0.5);
-  const need = draft.type === 'area' ? 3 : 2;
+  const need = draft.type === 'area' || draft.type === 'roof' ? 3 : 2;
   if (!c || pts.length < need) {
     cancelDraft();
-    drawOverlay(null, measure);
+    redraw();
     updateToolbar();
     return;
   }
   const m = { id: uid('mk'), conditionId: c.id, pageKey: store.ui.pageKey, type: draft.type, points: pts };
-  if (draft.type === 'area' && deduct) m.deduct = true;
+  if ((draft.type === 'area' || draft.type === 'roof') && deduct) m.deduct = true;
+  snapHit = null;
   cancelDraft();
   commit((p) => p.markups.push(m), 'markups-live');
 }
@@ -777,14 +861,20 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (store.ui.view !== 'takeoff') return;
-  const tools = { v: 'select', h: 'pan', l: 'linear', a: 'area', c: 'count', m: 'measure', k: 'calibrate' };
+  if (k === 'Tab') {
+    e.preventDefault();
+    return setTool(store.ui.tool === 'linear' ? 'area' : 'linear');
+  }
+  if (k.toLowerCase() === 's' && !e.altKey) return toggleSnap();
+  const tools = { v: 'select', h: 'pan', l: 'linear', a: 'area', r: 'roof', c: 'count', m: 'measure', k: 'calibrate' };
   if (tools[k.toLowerCase()] && !e.altKey) return setTool(tools[k.toLowerCase()]);
   switch (k) {
     case 'Escape':
       if (draft || measure) {
         cancelDraft();
         measure = null;
-        drawOverlay(null, null);
+        snapHit = null;
+        redraw();
         updateToolbar();
       } else if (store.ui.selectedMarkupId) {
         store.ui.selectedMarkupId = null;
@@ -798,7 +888,7 @@ document.addEventListener('keydown', (e) => {
       if (draft) {
         draft.points.pop();
         if (!draft.points.length) cancelDraft();
-        drawOverlay(draft, measure);
+        redraw();
         updateToolbar();
       } else deleteSelected();
       break;
@@ -872,7 +962,7 @@ function setView(v) {
   $('#workspace').classList.toggle('estimate-mode', v === 'estimate');
   $('#estimateView').hidden = v !== 'estimate';
   if (v === 'estimate') renderEstimate();
-  else requestAnimationFrame(() => drawOverlay(draft, measure));
+  else requestAnimationFrame(redraw);
   updateToolbar();
 }
 

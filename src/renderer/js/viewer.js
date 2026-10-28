@@ -1,5 +1,6 @@
 // PDF loading, page rendering, pan/zoom transform and thumbnails.
 import * as pdfjs from '../vendor/pdfjs/pdf.min.mjs';
+import { buildSnapIndex } from './snap.js';
 
 const BASE = new URL('../vendor/pdfjs/', import.meta.url).href;
 pdfjs.GlobalWorkerOptions.workerSrc = BASE + 'pdf.worker.min.mjs';
@@ -58,6 +59,7 @@ export function unloadDocument(docId) {
   docs.delete(docId);
   for (const k of [...pageCache.keys()]) if (k.startsWith(docId + ':')) pageCache.delete(k);
   for (const k of [...thumbCache.keys()]) if (k.startsWith(docId + ':')) thumbCache.delete(k);
+  for (const k of [...snapCache.keys()]) if (k.startsWith(docId + ':')) snapCache.delete(k);
 }
 
 export function unloadAll() {
@@ -218,6 +220,28 @@ export function clearCanvas() {
   view.pageW = view.pageH = 0;
   canvas.width = canvas.height = 0;
   renderSeq++;
+}
+
+// ---- Snap geometry (built once per sheet, in the background) ----
+const snapCache = new Map(); // pageKey -> Promise<SnapIndex|null>
+
+export function getSnapIndex(pageKey) {
+  if (!snapCache.has(pageKey)) {
+    snapCache.set(
+      pageKey,
+      (async () => {
+        try {
+          const page = await getPage(pageKey);
+          const vp = page.getViewport({ scale: 1 });
+          return await buildSnapIndex(page, pdfjs.OPS, vp.transform);
+        } catch (e) {
+          console.warn('snap geometry unavailable', e);
+          return null;
+        }
+      })()
+    );
+  }
+  return snapCache.get(pageKey);
 }
 
 // ---- Thumbnails (queued, one at a time) ----

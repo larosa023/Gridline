@@ -108,3 +108,49 @@ test('ortho snap', () => {
   const p = orthoSnap([0, 0], [10, 1]);
   close(p[1], 0);
 });
+
+import { parsePitch, slopeFactor, hipFactor, formatPitch } from '../src/renderer/js/units.js';
+
+test('parses roof pitch', () => {
+  close(parsePitch('6'), 6);
+  close(parsePitch('6/12'), 6);
+  close(parsePitch('6:12'), 6);
+  close(parsePitch('3 in 4'), 9);
+  close(parsePitch('45°'), 12);
+  assert.ok(isNaN(parsePitch('steep')));
+  assert.equal(formatPitch(6), '6/12');
+  close(slopeFactor(12), Math.SQRT2);
+  close(slopeFactor(6), 1.118033988749895);
+  close(hipFactor(12), Math.sqrt(1.5));
+});
+
+test('roof squares from plan area and pitch, with per-plane override and deduction', () => {
+  const k = 18;
+  const scaleFor = () => ({ ptPerUnit: k, unit: 'ft' });
+  const roof = { id: 'r', type: 'roof', pitch: 6, unit: 'ft', waste: 10, matCost: 120 };
+  const sq = (w, h) => [[0, 0], [w * k, 0], [w * k, h * k], [0, h * k]];
+  const t = conditionTotals(
+    roof,
+    [
+      { conditionId: 'r', type: 'roof', points: sq(40, 30), pageKey: 'p' }, // 1200 SF plan @ 6/12
+      { conditionId: 'r', type: 'roof', points: sq(10, 10), pageKey: 'p', pitch: 12 }, // 100 SF plan @ 12/12
+      { conditionId: 'r', type: 'roof', points: sq(4, 4), pageKey: 'p', deduct: true }, // skylight
+    ],
+    scaleFor
+  );
+  close(t.planArea, 1200 + 100 - 16);
+  close(t.area, 1200 * slopeFactor(6) + 100 * Math.SQRT2 - 16 * slopeFactor(6));
+  close(t.squares, t.area / 100);
+  const line = priceLine(roof, t);
+  assert.equal(line.basis, 'squares');
+  close(line.mat, t.squares * 1.1 * 120);
+});
+
+test('rake and hip lines use true sloped length', () => {
+  const k = 18;
+  const scaleFor = () => ({ ptPerUnit: k, unit: 'ft' });
+  const run = [{ conditionId: 'l', type: 'linear', points: [[0, 0], [20 * k, 0]], pageKey: 'p' }];
+  close(conditionTotals({ id: 'l', type: 'linear', roofLine: 'rake', pitch: 12 }, run, scaleFor).length, 20 * Math.SQRT2);
+  close(conditionTotals({ id: 'l', type: 'linear', roofLine: 'hip', pitch: 12 }, run, scaleFor).length, 20 * Math.sqrt(1.5));
+  close(conditionTotals({ id: 'l', type: 'linear' }, run, scaleFor).length, 20);
+});

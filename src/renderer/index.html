@@ -58,11 +58,17 @@
           <button class="tool" data-tool="select" title="Select (V)" data-icon="select"></button>
           <button class="tool" data-tool="pan" title="Pan (H)" data-icon="pan"></button>
           <span class="tool-sep"></span>
-          <button class="tool" data-tool="linear" title="Linear takeoff (L)" data-icon="linear"><span>Linear</span></button>
-          <button class="tool" data-tool="area" title="Area takeoff (A)" data-icon="area"><span>Area</span></button>
+          <div class="quick" title="Tab flips between Linear and Area">
+            <button class="tool qt" data-tool="linear" title="Linear feet (L) — one click, no setup" data-icon="linear"><b>LF</b><span>Linear</span></button>
+            <button class="tool qt-pick" data-pick="linear" title="Choose linear condition" data-icon="caret" data-size="14"></button>
+            <button class="tool qt" data-tool="area" title="Square feet (A) — one click, no setup" data-icon="area"><b>SF</b><span>Area</span></button>
+            <button class="tool qt-pick" data-pick="area" title="Choose area condition" data-icon="caret" data-size="14"></button>
+          </div>
+          <button class="tool" data-tool="roof" title="Roof takeoff with pitch (R)" data-icon="roof"><span>Roof</span></button>
           <button class="tool" data-tool="count" title="Count takeoff (C)" data-icon="count"><span>Count</span></button>
           <span class="tool-sep"></span>
           <button class="tool" data-tool="measure" title="Quick measure (M)" data-icon="measure"></button>
+          <button class="tool snap-btn" id="btnSnap" title="Snap to plan lines (S) — hold Ctrl to bypass" data-icon="magnet"><span>Snap</span></button>
         </div>
 
         <div class="active-cond" id="activeCond"></div>
@@ -84,6 +90,7 @@
         <div class="stage" id="stage">
           <canvas id="pdfCanvas"></canvas>
           <svg id="overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+          <svg id="snapLayer" xmlns="http://www.w3.org/2000/svg"></svg>
         </div>
         <div class="hud" id="hud" hidden></div>
         <div class="banner" id="scaleBanner" hidden>

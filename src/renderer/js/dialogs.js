@@ -1,11 +1,12 @@
 import { modal, h, esc, $ } from './dom.js';
 import { icon } from './icons.js';
 import { COLORS, store, nextColor } from './store.js';
-import { parseLength, formatFeetInches, presetToScale, SCALE_PRESETS } from './units.js';
+import { parseLength, formatFeetInches, presetToScale, SCALE_PRESETS, parsePitch, formatPitch } from './units.js';
 
 const TYPE_INFO = {
   linear: { label: 'Linear', icon: 'linear', hint: 'Walls, curbs, piping, trim' },
   area: { label: 'Area', icon: 'area', hint: 'Slabs, flooring, roofing' },
+  roof: { label: 'Roof', icon: 'roof', hint: 'Trace the roof in plan view — pitch converts it to true roof area and squares' },
   count: { label: 'Count', icon: 'count', hint: 'Fixtures, doors, devices' },
 };
 export { TYPE_INFO };
@@ -28,7 +29,7 @@ export function conditionDialog(initial = {}) {
       body.append(
         h(`<div>
           <div class="field full" style="margin-bottom:12px"><span>Type</span>
-            <div class="type-pick">${Object.entries(TYPE_INFO)
+            <div class="type-pick four">${Object.entries(TYPE_INFO)
               .map(
                 ([k, t]) =>
                   `<button type="button" data-type="${k}" class="${k === type ? 'sel' : ''}" ${isNew ? '' : 'disabled'}>${icon(t.icon, 20)}${t.label}</button>`
@@ -41,8 +42,14 @@ export function conditionDialog(initial = {}) {
             <label class="field"><span>Group / division</span><input name="group" list="groupList" value="${esc(initial.group || '')}" placeholder="e.g. 09 – Finishes" />
               <datalist id="groupList">${groups.map((g) => `<option value="${esc(g)}">`).join('')}</datalist></label>
             <label class="field" data-only="linear area"><span>Height <small class="muted">(${metric ? 'm' : 'ft-in'}, optional)</small></span><input name="height" value="${initial.height ? (metric ? initial.height : formatFeetInches(initial.height)) : ''}" placeholder="${metric ? '3.0' : "10'-0\""}" /></label>
+            <label class="field" data-only="roof"><span>Pitch <small class="muted">(rise per 12)</small></span><input name="pitch" value="${initial.pitch != null && initial.pitch !== '' ? formatPitch(initial.pitch) : '6/12'}" placeholder="6/12" /></label>
+            <label class="field" data-only="linear"><span>Roof line <small class="muted">(optional)</small></span><select name="roofLine">
+              <option value="">Flat / plan length</option>
+              <option value="rake" ${initial.roofLine === 'rake' ? 'selected' : ''}>Rake / sloped run</option>
+              <option value="hip" ${initial.roofLine === 'hip' ? 'selected' : ''}>Hip / valley</option></select></label>
+            <label class="field" data-only="linear-roof"><span>Line pitch <small class="muted">(rise per 12)</small></span><input name="linePitch" value="${initial.type === 'linear' && initial.pitch ? formatPitch(initial.pitch) : ''}" placeholder="6/12" /></label>
             <label class="field" data-only="area"><span>Depth / thickness <small class="muted">(${metric ? 'mm' : 'in'}, optional)</small></span><input name="depth" type="number" step="any" min="0" value="${initial.depth || ''}" placeholder="${metric ? '100' : '4'}" /></label>
-            <label class="field"><span>Waste</span><div class="input-affix"><input name="waste" type="number" step="any" min="0" value="${initial.waste ?? 0}" /><i>%</i></div></label>
+            <label class="field"><span>Waste</span><div class="input-affix"><input name="waste" type="number" step="any" min="0" value="${initial.waste ?? ''}" placeholder="0" /><i>%</i></div></label>
             <label class="field"><span>Material cost</span><div class="input-affix"><input name="matCost" type="number" step="any" min="0" value="${initial.matCost ?? ''}" placeholder="0.00" /><i data-unit>/LF</i></div></label>
             <label class="field"><span>Labor cost</span><div class="input-affix"><input name="laborCost" type="number" step="any" min="0" value="${initial.laborCost ?? ''}" placeholder="0.00" /><i data-unit>/LF</i></div></label>
             <div class="field full"><span>Color</span><div class="colors">${COLORS.map(
@@ -51,10 +58,15 @@ export function conditionDialog(initial = {}) {
           </div>
         </div>`)
       );
+      const roofLine = body.querySelector('[name=roofLine]');
       const sync = () => {
         body.querySelectorAll('[data-type]').forEach((b) => b.classList.toggle('sel', b.dataset.type === type));
-        body.querySelectorAll('[data-only]').forEach((f) => (f.hidden = !f.dataset.only.split(' ').includes(type)));
-        const u = type === 'linear' ? (metric ? '/m' : '/LF') : type === 'area' ? (metric ? '/m²' : '/SF') : '/EA';
+        body.querySelectorAll('[data-only]').forEach((f) => {
+          const only = f.dataset.only.split(' ');
+          f.hidden = only.includes('linear-roof') ? !(type === 'linear' && roofLine.value) : !only.includes(type);
+        });
+        const u =
+          type === 'linear' ? (metric ? '/m' : '/LF') : type === 'area' ? (metric ? '/m²' : '/SF') : type === 'roof' ? (metric ? '/m²' : '/SQ') : '/EA';
         body.querySelectorAll('[data-unit]').forEach((i) => (i.textContent = u));
         $('#typeHint', body).textContent = TYPE_INFO[type].hint;
       };
@@ -72,6 +84,7 @@ export function conditionDialog(initial = {}) {
             body.querySelectorAll('[data-color]').forEach((x) => x.classList.toggle('sel', x === b));
           })
       );
+      roofLine.onchange = sync;
       sync();
     },
     onSubmit(form) {
@@ -89,14 +102,34 @@ export function conditionDialog(initial = {}) {
           return false;
         }
       }
+      const bad = (field, msg) => {
+        const el = form.querySelector(`[name=${field}]`);
+        el.setCustomValidity(msg);
+        form.reportValidity();
+        el.setCustomValidity('');
+        return false;
+      };
+      let pitch = 0;
+      let roofLine = '';
+      if (type === 'roof') {
+        pitch = parsePitch(f.get('pitch'));
+        if (!isFinite(pitch)) return bad('pitch', 'Enter a pitch like 6/12, 6 or 26.6°');
+      }
+      if (type === 'linear' && f.get('roofLine')) {
+        roofLine = String(f.get('roofLine'));
+        pitch = parsePitch(f.get('linePitch'));
+        if (!isFinite(pitch) || !pitch) return bad('linePitch', 'Enter the roof pitch, e.g. 6/12');
+      }
       return {
         name,
         type,
+        pitch,
+        roofLine,
         color,
         group: String(f.get('group') || '').trim(),
         height: type === 'count' ? 0 : height,
         depth: type === 'area' ? +f.get('depth') || 0 : 0,
-        waste: +f.get('waste') || 0,
+        waste: f.get('waste') === '' ? (type === 'roof' && isNew ? 10 : 0) : +f.get('waste') || 0,
         matCost: +f.get('matCost') || 0,
         laborCost: +f.get('laborCost') || 0,
       };
@@ -170,7 +203,11 @@ export function shortcutsDialog() {
     ['Pan', 'H or hold Space'],
     ['Linear takeoff', 'L'],
     ['Area takeoff', 'A'],
+    ['Roof takeoff (pitched)', 'R'],
     ['Count takeoff', 'C'],
+    ['Flip Linear ⇄ Area', 'Tab'],
+    ['Snap to plan lines on/off', 'S'],
+    ['Bypass snap while held', 'Ctrl'],
     ['Quick measure', 'M'],
     ['Calibrate scale', 'K'],
     ['Finish shape', 'Enter / double-click / right-click'],

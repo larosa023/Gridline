@@ -122,6 +122,40 @@ export function fmtLength(v, unit, style = 'ftin') {
   return style === 'ftin' ? formatFeetInches(v) : `${fmtNum(v, 2)} LF`;
 }
 
+/**
+ * Roof pitch as rise per 12 of run. Accepts "6", "6/12", "6:12", "6 in 12", "26.57°", "26.57deg".
+ * Returns NaN when unreadable.
+ */
+export function parsePitch(input) {
+  if (input == null) return NaN;
+  const s = String(input).trim().toLowerCase();
+  if (!s) return NaN;
+  const deg = s.match(/^(\d*\.?\d+)\s*(°|deg|degrees?)$/);
+  if (deg) {
+    const a = parseFloat(deg[1]);
+    if (a < 0 || a >= 90) return NaN;
+    return 12 * Math.tan((a * Math.PI) / 180);
+  }
+  const ratio = s.match(/^(\d*\.?\d+)\s*(?:\/|:|in)\s*(\d*\.?\d+)$/);
+  if (ratio) {
+    const run = parseFloat(ratio[2]);
+    return run ? (parseFloat(ratio[1]) * 12) / run : NaN;
+  }
+  const v = Number(s);
+  return isFinite(v) && v >= 0 ? v : NaN;
+}
+
+export function formatPitch(rise) {
+  if (!isFinite(rise)) return '—';
+  const r = Math.round(rise * 100) / 100;
+  return `${r}/12`;
+}
+
+/** Sloped surface / common rafter multiplier for a pitch (rise per 12). */
+export const slopeFactor = (rise) => Math.sqrt(1 + (rise / 12) ** 2);
+/** Hip / valley multiplier on an equal-pitch roof, applied to the hip's plan length. */
+export const hipFactor = (rise) => Math.sqrt(1 + (rise * rise) / 288);
+
 export const UNIT_LABELS = {
   ft: { length: 'LF', area: 'SF', volume: 'CY', count: 'EA' },
   m: { length: 'm', area: 'm²', volume: 'm³', count: 'EA' },

@@ -5,7 +5,7 @@ import { icon } from './icons.js';
 import { requestThumb } from './viewer.js';
 import { scaleFor } from './overlay.js';
 import { conditionTotals, markupQuantities, priceLine, costBasisOptions, basisLabel, basisUnit } from './geometry.js';
-import { fmtNum, fmtMoney, formatFeetInches, UNIT_LABELS, parseLength } from './units.js';
+import { fmtNum, fmtMoney, formatFeetInches, UNIT_LABELS, parseLength, parsePitch, formatPitch } from './units.js';
 import { TYPE_INFO } from './dialogs.js';
 
 let actions = {};
@@ -21,6 +21,7 @@ export function primaryQty(c, t = totalsFor(c)) {
   const u = UNIT_LABELS[store.project.unit];
   if (c.type === 'linear') return `${fmtNum(t.length, 1)} ${u.length}`;
   if (c.type === 'area') return `${fmtNum(t.area, 1)} ${u.area}`;
+  if (c.type === 'roof') return store.project.unit === 'm' ? `${fmtNum(t.area, 1)} ${u.area}` : `${fmtNum(t.squares, 2)} SQ · ${formatPitch(+c.pitch || 0)}`;
   return `${fmtNum(t.count, 0)} ${u.count}`;
 }
 
@@ -174,29 +175,44 @@ export function renderInspector() {
   const parts = [];
 
   if (c) {
+    const cu = { ...c, unit: p.unit };
     const t = totalsFor(c);
-    const line = priceLine(c, t);
+    const line = priceLine(cu, t);
     const pageT = conditionTotals(
       { ...c, unit: p.unit },
       p.markups.filter((x) => x.pageKey === store.ui.pageKey),
       scaleFor
     );
+    const metric = p.unit === 'm';
     const big =
       c.type === 'linear'
-        ? [fmtNum(t.length, 2), u.length, 'Total length']
+        ? [fmtNum(t.length, 2), u.length, c.roofLine ? 'True length (sloped)' : 'Total length']
         : c.type === 'area'
           ? [fmtNum(t.area, 2), u.area, 'Total area']
-          : [fmtNum(t.count, 0), u.count, 'Total count'];
+          : c.type === 'roof'
+            ? metric
+              ? [fmtNum(t.area, 2), u.area, 'Roof area (sloped)']
+              : [fmtNum(t.squares, 2), 'SQ', 'Roofing squares']
+            : [fmtNum(t.count, 0), u.count, 'Total count'];
     const pageVal =
-      c.type === 'linear' ? `${fmtNum(pageT.length, 1)} ${u.length}` : c.type === 'area' ? `${fmtNum(pageT.area, 1)} ${u.area}` : `${pageT.count} ${u.count}`;
+      c.type === 'linear'
+        ? `${fmtNum(pageT.length, 1)} ${u.length}`
+        : c.type === 'area' || c.type === 'roof'
+          ? `${fmtNum(pageT.area, 1)} ${u.area}`
+          : `${pageT.count} ${u.count}`;
     const extra = [];
+    if (c.type === 'roof') {
+      if (!metric) extra.push(['Roof area', fmtNum(t.area, 1), u.area]);
+      extra.push(['Plan area', fmtNum(t.planArea, 1), u.area]);
+      extra.push(['Perimeter (plan)', fmtNum(t.perimeter, 1), u.length]);
+    }
     if (c.type === 'linear' && c.height) extra.push(['Wall area', fmtNum(t.area, 1), u.area]);
     if (c.type === 'area') {
       extra.push(['Perimeter', fmtNum(t.perimeter, 1), u.length]);
       if (c.depth) extra.push(['Volume', fmtNum(t.volume, 2), u.volume]);
       if (c.height) extra.push(['Wall area', fmtNum(t.wallArea, 1), u.area]);
     }
-    const opts = costBasisOptions(c);
+    const opts = costBasisOptions(cu);
     parts.push(`<div class="insp-section">
       <div class="insp-title">Condition <button class="icon-btn" data-act="edit" title="Edit">${icon('tag', 14)}</button></div>
       <div class="insp-head">
@@ -215,10 +231,12 @@ export function renderInspector() {
       <div class="insp-title">Properties</div>
       <div class="fields">
         <label class="field full"><span>Group / division</span><input data-f="group" value="${esc(c.group || '')}" placeholder="e.g. 03 – Concrete" /></label>
-        ${c.type !== 'count' ? `<label class="field"><span>Height</span><input data-f="height" value="${c.height ? (p.unit === 'm' ? c.height : formatFeetInches(c.height)) : ''}" placeholder="—" /></label>` : ''}
+        ${c.type === 'linear' || c.type === 'area' ? `<label class="field"><span>Height</span><input data-f="height" value="${c.height ? (p.unit === 'm' ? c.height : formatFeetInches(c.height)) : ''}" placeholder="—" /></label>` : ''}
+        ${c.type === 'roof' || (c.type === 'linear' && c.roofLine) ? `<label class="field"><span>Pitch</span><input data-f="pitch" value="${formatPitch(+c.pitch || 0)}" placeholder="6/12" /></label>` : ''}
+        ${c.type === 'linear' ? `<label class="field"><span>Roof line</span><select data-f="roofLine"><option value="">Flat</option><option value="rake" ${c.roofLine === 'rake' ? 'selected' : ''}>Rake</option><option value="hip" ${c.roofLine === 'hip' ? 'selected' : ''}>Hip / valley</option></select></label>` : ''}
         ${c.type === 'area' ? `<label class="field"><span>Depth (${p.unit === 'm' ? 'mm' : 'in'})</span><input data-f="depth" type="number" step="any" min="0" value="${c.depth || ''}" placeholder="—" /></label>` : ''}
         <label class="field"><span>Waste %</span><input data-f="waste" type="number" step="any" min="0" value="${c.waste || 0}" /></label>
-        ${opts.length > 1 ? `<label class="field"><span>Price by</span><select data-f="costBasis">${opts.map((o) => `<option value="${o}" ${o === line.basis ? 'selected' : ''}>${basisLabel(o)} (${basisUnit(o, p.unit)})</option>`).join('')}</select></label>` : ''}
+        ${opts.length > 1 ? `<label class="field"><span>Price by</span><select data-f="costBasis">${opts.map((o) => `<option value="${o}" ${o === line.basis ? 'selected' : ''}>${basisLabel(o, c)} (${basisUnit(o, p.unit)})</option>`).join('')}</select></label>` : ''}
         <label class="field"><span>Material $/${basisUnit(line.basis, p.unit)}</span><input data-f="matCost" type="number" step="any" min="0" value="${c.matCost || ''}" placeholder="0.00" /></label>
         <label class="field"><span>Labor $/${basisUnit(line.basis, p.unit)}</span><input data-f="laborCost" type="number" step="any" min="0" value="${c.laborCost || ''}" placeholder="0.00" /></label>
       </div>
@@ -230,17 +248,23 @@ export function renderInspector() {
   }
 
   if (m) {
-    const q = markupQuantities(m, scaleFor(m.pageKey));
+    const mc = condition(m.conditionId);
+    const q = markupQuantities(m, scaleFor(m.pageKey), mc);
     let rows = '';
     if (q.unscaled) rows = `<p class="small" style="color:var(--accent)">Sheet isn't scaled.</p>`;
     if (q.length != null) rows += `<div class="kv"><span>Length</span><b>${p.unit === 'm' ? fmtNum(q.length, 2) + ' m' : formatFeetInches(q.length)}</b></div><div class="kv"><span>Segments</span><b>${q.segments}</b></div>`;
-    if (q.area != null) rows += `<div class="kv"><span>Area</span><b>${fmtNum(Math.abs(q.area), 2)} ${u.area}</b></div><div class="kv"><span>Perimeter</span><b>${fmtNum(q.perimeter, 2)} ${u.length}</b></div>`;
+    if (q.planArea != null) {
+      rows += `<div class="kv"><span>Roof area</span><b>${fmtNum(Math.abs(q.area), 2)} ${u.area}</b></div>`;
+      if (p.unit !== 'm') rows += `<div class="kv"><span>Squares</span><b>${fmtNum(Math.abs(q.squares), 2)} SQ</b></div>`;
+      rows += `<div class="kv"><span>Plan area</span><b>${fmtNum(Math.abs(q.planArea), 2)} ${u.area}</b></div>`;
+      rows += `<label class="field" style="margin-top:8px"><span>Pitch for this roof plane</span><input data-mf="pitch" value="${m.pitch != null && m.pitch !== '' ? formatPitch(m.pitch) : ''}" placeholder="Condition pitch (${formatPitch(+(mc && mc.pitch) || 0)})" /></label>`;
+    } else if (q.area != null) rows += `<div class="kv"><span>Area</span><b>${fmtNum(Math.abs(q.area), 2)} ${u.area}</b></div><div class="kv"><span>Perimeter</span><b>${fmtNum(q.perimeter, 2)} ${u.length}</b></div>`;
     if (q.count != null) rows += `<div class="kv"><span>Count</span><b>${q.count}</b></div>`;
     parts.push(`<div class="insp-section">
       <div class="insp-title">Selected markup</div>
       ${rows}
       <div class="row">
-        ${m.type === 'area' ? `<button class="btn small" data-act="deduct">${m.deduct ? 'Make additive' : 'Make deduction'}</button>` : ''}
+        ${m.type === 'area' || m.type === 'roof' ? `<button class="btn small" data-act="deduct">${m.deduct ? 'Make additive' : 'Make deduction'}</button>` : ''}
         <button class="btn small danger" data-act="delete">${icon('trash', 14)} Delete</button>
       </div>
     </div>`);
@@ -249,7 +273,7 @@ export function renderInspector() {
   if (!c && !m) {
     parts.push(`<div class="insp-empty">${icon('layers', 32)}
       <h3>No condition selected</h3>
-      <p>Choose a condition from the left, or press <kbd>L</kbd>, <kbd>A</kbd> or <kbd>C</kbd> to start measuring.</p>
+      <p>Click <b>LF</b> or <b>SF</b> in the toolbar to start measuring right away — or press <kbd>L</kbd>, <kbd>A</kbd>, <kbd>R</kbd> (roof) or <kbd>C</kbd>.</p>
       <button class="btn primary" data-act="new">${icon('plus', 15)} New condition</button></div>`);
   }
 
@@ -273,7 +297,10 @@ export function renderInspector() {
     const f = inp.dataset.f;
     const save = () => {
       let v = inp.value;
-      if (f === 'height') {
+      if (f === 'pitch') {
+        v = parsePitch(v);
+        if (!isFinite(v)) return renderInspector();
+      } else if (f === 'height') {
         v = v.trim() ? parseLength(v, p.unit) : 0;
         if (!isFinite(v) || v < 0) return renderInspector();
       } else if (['depth', 'waste', 'matCost', 'laborCost'].includes(f)) v = +v || 0;
@@ -283,6 +310,21 @@ export function renderInspector() {
       commit(() => (c[f] = v), 'conditions');
     };
     inp.addEventListener('change', save);
+    inp.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') inp.blur();
+    });
+  });
+  el.querySelectorAll('[data-mf="pitch"]').forEach((inp) => {
+    inp.addEventListener('change', () => {
+      const raw = inp.value.trim();
+      const v = raw ? parsePitch(raw) : null;
+      if (raw && !isFinite(v)) return renderInspector();
+      commit(() => {
+        if (v == null) delete m.pitch;
+        else m.pitch = v;
+      }, 'markups');
+    });
     inp.addEventListener('keydown', (e) => {
       e.stopPropagation();
       if (e.key === 'Enter') inp.blur();

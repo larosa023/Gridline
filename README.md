@@ -15,8 +15,11 @@
 
 - **Plans** — drop in PDF drawing sets (multi-page). Sheets are auto-named from the title block (e.g. `A-101`) and shown with thumbnails.
 - **Scale** — architectural, engineering and metric presets, or **calibrate** from any known dimension. Apply one scale to a whole set.
+- **Quick LF / SF toggles** — one click on **LF** or **SF** (or `Tab` to flip between them) and you're measuring; no condition setup required. Each toggle remembers the last condition you used with it, and its ▾ menu switches conditions.
+- **Snap to plan lines** — Gridline reads the vector linework in the PDF and snaps to wall corners (□), line crossings (×) and anywhere along a line (◇), plus your existing markup points. `S` toggles it; hold `Ctrl` to place a free point.
 - **Takeoff tools**
-  - **Linear** — walls, curbs, pipe, trim. Optional height gives wall SF.
+  - **Linear** — walls, curbs, pipe, trim. Optional height gives wall SF. Set a roof line type (rake or hip/valley) plus pitch to get true sloped length.
+  - **Roof** — trace roof planes in plan view and enter the pitch (`6/12`, `6`, or `26.6°`). You get true roof area, **squares**, plan area and perimeter. Override the pitch per roof plane; hold **Alt** to deduct skylights and chimneys. Roofing defaults to 10% waste and pricing per square.
   - **Area** — slabs, flooring, roofing. Optional depth gives CY; hold **Alt** when finishing to make a **deduction** (openings, shafts).
   - **Count** — fixtures, devices, doors, with on-plan numbering.
   - **Quick measure** — one-off dimensions without saving a markup.
@@ -41,7 +44,9 @@ Download **[Gridline-Setup.exe](https://github.com/larosa023/Gridline/releases/l
 | Pan | `H` or hold `Space` | Remove last point | `Backspace` |
 | Linear | `L` | Cancel | `Esc` |
 | Area | `A` | Fit page | `F` |
+| Roof | `R` | Flip Linear ⇄ Area | `Tab` |
 | Count | `C` | Prev / next sheet | `PgUp` / `PgDn` |
+| Snap on/off | `S` | Free point (no snap) | hold `Ctrl` |
 | Measure | `M` | Undo / redo | `Ctrl+Z` / `Ctrl+Y` |
 | Calibrate | `K` | Takeoff / Estimate | `Ctrl+1` / `Ctrl+2` |
 

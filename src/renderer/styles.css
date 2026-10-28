@@ -587,7 +587,7 @@ button {
   height: 48px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 0 10px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
@@ -675,8 +675,8 @@ button {
   background: var(--bg-2);
   border: 1px solid var(--border);
   font-weight: 600;
-  flex: 0 1 260px;
-  min-width: 120px;
+  flex: 0 1 240px;
+  min-width: 0;
   overflow: hidden;
 }
 .active-cond:empty {
@@ -727,6 +727,13 @@ button {
   position: absolute;
   left: 0;
   top: 0;
+}
+#snapLayer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
 }
 #overlay {
   position: absolute;
@@ -1396,13 +1403,100 @@ kbd {
 .tool-group {
   flex: none;
 }
+.quick {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  margin: 0 2px;
+}
+.quick .tool {
+  height: 30px;
+}
+.quick .qt {
+  border-radius: 8px 0 0 8px;
+  padding: 0 8px 0 9px;
+}
+.quick .qt b {
+  font-size: 12px;
+  letter-spacing: 0.3px;
+}
+.quick .qt span {
+  font-weight: 500;
+  color: var(--muted);
+}
+.quick .qt.active span {
+  color: inherit;
+}
+.quick .qt-pick {
+  min-width: 20px;
+  width: 20px;
+  padding: 0;
+  border-radius: 0 8px 8px 0;
+  color: var(--muted);
+  margin-right: 2px;
+}
+.quick .qt-pick:last-child {
+  margin-right: 0;
+}
+.quick .qt.active + .qt-pick {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  border-left-color: transparent;
+}
+.quick .qt.active {
+  border-right-color: transparent;
+}
+.snap-btn.on {
+  color: #22b8cf;
+}
+.snap-btn.on:not(.active)::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22b8cf;
+  margin-left: -2px;
+}
+.type-pick.four {
+  grid-template-columns: repeat(4, 1fr);
+}
+.ctx-menu .menu-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  font-weight: 700;
+  padding: 6px 9px 4px;
+}
+.ctx-menu button.current {
+  background: var(--accent-soft);
+}
+.ctx-menu .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
 @media (max-width: 1560px) {
-  .tool span,
+  .tool:not(.qt) span,
+  .quick .qt span,
   #btnCalibrate span {
     display: none;
   }
   .scale-box select {
-    max-width: 140px;
+    max-width: 124px;
+  }
+  .toolbar .tool {
+    min-width: 30px;
+    padding: 0 6px;
+  }
+  .toolbar .tool-sep {
+    margin: 0 3px;
   }
 }
 @media (max-width: 1240px) {
