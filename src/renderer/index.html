@@ -22,6 +22,7 @@
 
     <div class="topbar-right">
       <button id="updatePill" class="update-pill" hidden></button>
+      <button class="btn ghost" id="btnAsk" title="Ask the assistant to do it ( / )" data-icon="sparkle">Ask</button>
       <button class="btn ghost icon-only" id="btnTheme" title="Toggle theme (Ctrl+Shift+T)" data-icon="moon"></button>
       <button class="btn ghost icon-only" id="btnSettings" title="Settings (Ctrl+,)" data-icon="gear"></button>
       <button class="btn ghost" id="btnOpen" data-icon="folder">Open</button>
@@ -137,7 +138,14 @@
     </section>
 
     <!-- RIGHT: inspector -->
-    <aside class="panel right" id="inspector"></aside>
+    <aside class="panel right" id="rightPanel">
+      <div class="tabs">
+        <button class="tab active" data-right="props">Properties</button>
+        <button class="tab" data-right="ai" data-icon="sparkle" data-size="15">Assistant</button>
+      </div>
+      <div class="panel-body" id="inspector"></div>
+      <div class="panel-body ai-panel" id="aiPanel" hidden></div>
+    </aside>
 
     <!-- ESTIMATE VIEW -->
     <section class="estimate" id="estimateView" hidden></section>

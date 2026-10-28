@@ -121,3 +121,17 @@ export function nextColor() {
   const used = store.project.conditions.map((c) => c.color);
   return COLORS.find((c) => !used.includes(c)) || COLORS[store.project.conditions.length % COLORS.length];
 }
+
+/** Position in the undo history, for grouping several commits into one step. */
+export function historyMark() {
+  return undoStack.length;
+}
+
+/** Collapse every commit made since `mark` into a single undo step. Returns true if anything changed. */
+export function squashHistory(mark) {
+  if (undoStack.length <= mark) return false;
+  const first = undoStack[mark];
+  undoStack.length = mark;
+  undoStack.push(first);
+  return true;
+}

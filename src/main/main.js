@@ -4,6 +4,7 @@ const fs = require('fs/promises');
 const log = require('electron-log/main');
 const { buildMenu } = require('./menu');
 const updater = require('./updater');
+const ollama = require('./ollama');
 
 log.initialize();
 log.transports.file.level = 'info';
@@ -70,6 +71,7 @@ function createWindow() {
   win.webContents.on('will-navigate', (e) => e.preventDefault());
 
   updater.init(win);
+  ollama.init(win);
 }
 
 app.whenReady().then(createWindow);

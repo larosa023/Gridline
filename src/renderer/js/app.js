@@ -4,6 +4,7 @@ import * as viewer from './viewer.js';
 import { view } from './viewer.js';
 import { initOverlay, drawOverlay, drawSnapLayer, setAux, scaleFor, lengthLabel, areaLabel, lineFactor } from './overlay.js';
 import { findSnap } from './snap.js';
+import { initAssistant, renderAssistant } from './assistant.js';
 import { fillAt, clearFillCache } from './fill.js';
 import { markupPitch } from './geometry.js';
 import { initPanels, renderSheets, renderConditions, renderInspector, setSheetMode } from './panels.js';
@@ -1188,6 +1189,10 @@ document.addEventListener('keydown', (e) => {
     return setTool(store.ui.tool === 'linear' ? 'area' : 'linear');
   }
   if (k.toLowerCase() === 's' && !e.altKey) return toggleSnap();
+  if (k === '/') {
+    e.preventDefault();
+    return openAssistant();
+  }
   if (k === '[') return togglePanel('left');
   if (k === ']') return togglePanel('right');
   if (k === '\\') return togglePanel('both');
@@ -1269,6 +1274,34 @@ $('#btnSave').onclick = () => saveProject();
 $('#btnTheme').onclick = toggleTheme;
 $('#btnSettings').onclick = openSettings;
 
+// ---------- Right panel: Properties / Assistant ----------
+function setRightTab(tab) {
+  store.ui.rightTab = tab;
+  $$('.tab[data-right]').forEach((x) => x.classList.toggle('active', x.dataset.right === tab));
+  $('#inspector').hidden = tab !== 'props';
+  $('#aiPanel').hidden = tab !== 'ai';
+  if (tab === 'ai') renderAssistant();
+}
+$$('.tab[data-right]').forEach((t) => (t.onclick = () => setRightTab(t.dataset.right)));
+function openAssistant() {
+  if (store.ui.view !== 'takeoff') setView('takeoff');
+  if (panels.right) togglePanel('right');
+  setRightTab('ai');
+  setTimeout(() => {
+    const i = document.getElementById('aiInput');
+    if (i && !i.closest('[hidden]')) i.focus();
+  }, 50);
+}
+$('#btnAsk').onclick = openAssistant;
+initAssistant(api, {
+  orderedPageKeys,
+  goToPage,
+  detectScales,
+  autoFill,
+  findMatches,
+  refresh: () => refresh('all'),
+});
+
 // ---------- Collapsible side panels ----------
 const panels = { left: pref('gridline-hide-left', 'off') === 'on', right: pref('gridline-hide-right', 'off') === 'on' };
 function applyPanels() {
@@ -1306,11 +1339,11 @@ $('#projectName').addEventListener('change', (e) => {
 });
 $('#projectName').addEventListener('keydown', (e) => e.key === 'Enter' && e.target.blur());
 
-$$('.tab').forEach(
+$$('.tab[data-left]').forEach(
   (t) =>
     (t.onclick = () => {
       store.ui.leftTab = t.dataset.left;
-      $$('.tab').forEach((x) => x.classList.toggle('active', x === t));
+      $$('.tab[data-left]').forEach((x) => x.classList.toggle('active', x === t));
       $('#sheetsPanel').hidden = t.dataset.left !== 'sheets';
       $('#conditionsPanel').hidden = t.dataset.left !== 'conditions';
     })
