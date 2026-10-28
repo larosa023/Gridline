@@ -22,7 +22,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Is this version already released?
         id: ver
@@ -36,14 +36,15 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match package.json version v$v"
             exit 1
           fi
-          if gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          # Released = the release exists AND carries latest.yml (what the updater reads).
+          if gh release view "v$v" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx latest.yml; then
             echo "v$v is already released — nothing to do."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: steps.ver.outputs.skip == 'false'
         with:
           node-version: 22
@@ -57,22 +58,30 @@ jobs:
         if: steps.ver.outputs.skip == 'false'
         run: npm test
 
-      - name: Build installer and publish release
+      - name: Build installer
         if: steps.ver.outputs.skip == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder --win nsis --x64 --publish always
+        run: npx electron-builder --win nsis --x64 --publish never
 
-      - name: Add stable-named installer (for a permanent download link)
+      - name: Publish GitHub release
         if: steps.ver.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           v="${{ steps.ver.outputs.version }}"
-          cp "dist/Gridline-Setup-$v.exe" "dist/Gridline-Setup.exe"
-          gh release upload "v$v" "dist/Gridline-Setup.exe" --clobber --repo "$GITHUB_REPOSITORY"
-          gh release edit "v$v" --title "Gridline $v" --latest --repo "$GITHUB_REPOSITORY"
+          cd dist
+          ls -la
+          for f in "Gridline-Setup-$v.exe" "Gridline-Setup-$v.exe.blockmap" latest.yml; do
+            [ -f "$f" ] || { echo "::error::Missing build output $f"; exit 1; }
+          done
+          cp "Gridline-Setup-$v.exe" Gridline-Setup.exe
+          assets=("Gridline-Setup-$v.exe" "Gridline-Setup-$v.exe.blockmap" latest.yml Gridline-Setup.exe)
+          if gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "v$v" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "v$v" --title "Gridline $v" --draft=false --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "v$v" "${assets[@]}" --title "Gridline $v" --target "$GITHUB_SHA" --generate-notes --latest --repo "$GITHUB_REPOSITORY"
+          fi
 
       - uses: actions/upload-artifact@v4
         if: steps.ver.outputs.skip == 'false'
