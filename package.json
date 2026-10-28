@@ -1,7 +1,7 @@
 {
   "name": "gridline",
   "productName": "Gridline",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Modern, lightweight construction takeoff and estimating for Windows.",
   "author": "Anthony LaRosa",
   "license": "MIT",
@@ -41,7 +41,11 @@
       "src/**/*",
       "build/icon.png",
       "package.json",
-      "!**/*.map"
+      "!**/*.map",
+      "!**/*.md",
+      "!**/*.d.ts",
+      "!**/CHANGELOG*",
+      "!src/renderer/vendor/pdfjs/wasm/quickjs-*"
     ],
     "asar": true,
     "win": {
@@ -84,6 +88,11 @@
         "repo": "Gridline",
         "releaseType": "release"
       }
-    ]
+    ],
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US"
+    ],
+    "removePackageScripts": true
   }
 }
