@@ -13,7 +13,8 @@
 
 ## What it does
 
-- **Plans** — drop in PDF drawing sets (multi-page). Sheets are auto-named from the title block (e.g. `A-101`) and shown with thumbnails.
+- **Plans** — drop in PDF drawing sets (multi-page). Sheets are auto-named from the title block (e.g. `A-101`) and shown with thumbnails. The sheet list switches between **All** pages and **Current** page only (each PDF also collapses with its arrow), and **×** closes a PDF. *File → Close Project* (`Ctrl+W`) closes everything.
+- **Settings** (gear icon, `Ctrl+,`) — theme (dark / light / match Windows), snap on/off and strength, sheet list mode, automatic updates, and per-project units, length display (ft-in or decimal), on-plan labels and estimate markups. Project settings can be saved as defaults for new projects.
 - **Scale** — architectural, engineering and metric presets, or **calibrate** from any known dimension. Apply one scale to a whole set.
 - **Quick LF / SF toggles** — one click on **LF** or **SF** (or `Tab` to flip between them) and you're measuring; no condition setup required. Each toggle remembers the last condition you used with it, and its ▾ menu switches conditions.
 - **Snap to plan lines** — Gridline reads the vector linework in the PDF and snaps to wall corners (□), line crossings (×) and anywhere along a line (◇), plus your existing markup points. `S` toggles it; hold `Ctrl` to place a free point.

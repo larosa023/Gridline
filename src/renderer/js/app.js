@@ -5,9 +5,9 @@ import { view } from './viewer.js';
 import { initOverlay, drawOverlay, drawSnapLayer, scaleFor, lengthLabel, areaLabel, lineFactor } from './overlay.js';
 import { findSnap } from './snap.js';
 import { markupPitch } from './geometry.js';
-import { initPanels, renderSheets, renderConditions, renderInspector, markSheetActive } from './panels.js';
+import { initPanels, renderSheets, renderConditions, renderInspector, setSheetMode } from './panels.js';
 import { initEstimate, renderEstimate, estimateCsv } from './estimate.js';
-import { conditionDialog, calibrateDialog, scaleOptionsHtml, presetToScale, shortcutsDialog, aboutDialog, TYPE_INFO } from './dialogs.js';
+import { conditionDialog, calibrateDialog, scaleOptionsHtml, presetToScale, shortcutsDialog, aboutDialog, settingsDialog, TYPE_INFO } from './dialogs.js';
 import { SCALE_PRESETS } from './units.js';
 import { $, $$, h, esc, toast, modal, contextMenu, closeContextMenu } from './dom.js';
 import { hydrateIcons, icon } from './icons.js';
@@ -47,7 +47,24 @@ function download(text, name) {
 let draft = null; // shape being drawn: { type, points, hover, color }
 let measure = null; // quick-measure: { points: [] }
 let manualCheck = false;
-let snapOn = localStorage.getItem('gridline-snap') !== 'off';
+const pref = (k, d) => {
+  try {
+    const v = localStorage.getItem(k);
+    return v == null ? d : v;
+  } catch {
+    return d;
+  }
+};
+const setPref = (k, v) => {
+  try {
+    localStorage.setItem(k, v);
+  } catch {}
+};
+let themePref = 'dark';
+const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
+let snapOn = pref('gridline-snap', 'on') !== 'off';
+let snapRadius = +pref('gridline-snap-radius', '10') || 10;
+let autoUpdate = pref('gridline-auto-update', 'on') !== 'off';
 let snapIndex = null; // line geometry of the current sheet
 let snapHit = null; // current snap target, shown as a marker
 const DRAW_TOOLS = ['linear', 'area', 'roof', 'count', 'measure', 'calibrate'];
@@ -58,6 +75,7 @@ hydrateIcons();
 viewer.initViewer({ canvasEl: $('#pdfCanvas'), stageEl: $('#stage'), viewport: vpEl, onViewChange });
 initOverlay($('#overlay'), $('#snapLayer'));
 store.ui.lastByType = {};
+store.ui.sheetMode = pref('gridline-sheets', 'all') === 'current' ? 'current' : 'all';
 const panelActions = {
   goToPage,
   removeDocument,
@@ -73,7 +91,8 @@ const panelActions = {
 initPanels(panelActions);
 initEstimate({ setUnit, exportCsv });
 
-applyTheme(localStorage.getItem('gridline-theme') || 'dark');
+applyTheme(pref('gridline-theme', 'dark'));
+if (api.updater.setAuto) api.updater.setAuto(autoUpdate);
 api.version().then((v) => {
   store.version = v;
   $('#statusVersion').textContent = 'v' + v;
@@ -160,11 +179,13 @@ function toolHint() {
 
 // ---------- Theme ----------
 function applyTheme(t) {
-  document.documentElement.dataset.theme = t;
-  localStorage.setItem('gridline-theme', t);
-  const b = $('#btnTheme');
-  b.innerHTML = icon(t === 'dark' ? 'sun' : 'moon');
+  themePref = t;
+  setPref('gridline-theme', t);
+  const actual = t === 'system' ? (systemDark.matches ? 'dark' : 'light') : t;
+  document.documentElement.dataset.theme = actual;
+  $('#btnTheme').innerHTML = icon(actual === 'dark' ? 'sun' : 'moon');
 }
+systemDark.addEventListener('change', () => themePref === 'system' && applyTheme('system'));
 const toggleTheme = () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
 
 // ---------- Files ----------
@@ -249,8 +270,8 @@ async function confirmDiscard(action = 'continue') {
   return true;
 }
 
-async function newProject() {
-  if (!(await confirmDiscard('start a new project'))) return;
+async function newProject(action = 'start a new project') {
+  if (!(await confirmDiscard(action))) return false;
   viewer.unloadAll();
   viewer.clearCanvas();
   store.project = blankProject();
@@ -261,6 +282,54 @@ async function newProject() {
   resetHistory();
   markDirty(false);
   emit('all');
+  return true;
+}
+
+async function closeProject() {
+  if (!store.project.documents.length && !store.project.conditions.length && !store.filePath) return;
+  const name = store.project.name;
+  if (await newProject('close it')) toast(`Closed ${name}`, { timeout: 1800 });
+}
+
+function closeCurrentDrawing() {
+  const key = store.ui.pageKey || orderedPageKeys()[0];
+  if (!key) return toast('No drawing is open.');
+  removeDocument(key.split(':')[0]);
+}
+
+async function openSettings() {
+  const s = store.project.settings;
+  const r = await settingsDialog({
+    app: { theme: themePref, snap: snapOn, snapRadius, sheetMode: store.ui.sheetMode, autoUpdate },
+    proj: { unit: store.project.unit, labelStyle: s.labelStyle, showLabels: s.showLabels, taxPct: s.taxPct, overheadPct: s.overheadPct, profitPct: s.profitPct },
+    version: store.version,
+    hasProject: true,
+    onCheckUpdates: () => {
+      manualCheck = true;
+      api.updater.check();
+    },
+  });
+  if (!r) return;
+  applyTheme(r.app.theme);
+  snapOn = r.app.snap;
+  setPref('gridline-snap', snapOn ? 'on' : 'off');
+  snapRadius = r.app.snapRadius;
+  setPref('gridline-snap-radius', String(snapRadius));
+  autoUpdate = r.app.autoUpdate;
+  setPref('gridline-auto-update', autoUpdate ? 'on' : 'off');
+  if (api.updater.setAuto) api.updater.setAuto(autoUpdate);
+  if (r.app.sheetMode !== store.ui.sheetMode) setSheetMode(r.app.sheetMode);
+  const { unit, ...rest } = r.proj;
+  const changed = unit !== store.project.unit || Object.keys(rest).some((k) => s[k] !== rest[k]);
+  if (changed)
+    commit((p) => {
+      p.unit = unit;
+      Object.assign(p.settings, rest);
+    }, 'settings');
+  if (r.makeDefault) setPref('gridline-project-defaults', JSON.stringify(r.proj));
+  snapHit = null;
+  refresh('all');
+  toast('Settings saved', { kind: 'ok', timeout: 1500 });
 }
 
 async function openProject(path) {
@@ -328,14 +397,17 @@ async function exportCsv() {
 async function removeDocument(docId) {
   const d = store.project.documents.find((x) => x.id === docId);
   const n = store.project.markups.filter((m) => m.pageKey.startsWith(docId + ':')).length;
-  const r = await api.message({
-    type: 'warning',
-    message: `Remove "${d.name}"${n ? ` and its ${n} markup${n > 1 ? 's' : ''}` : ''}? This can't be undone.`,
-    buttons: ['Remove', 'Cancel'],
-    defaultId: 1,
-    cancelId: 1,
-  });
-  if (r !== 0) return;
+  if (n) {
+    const r = await api.message({
+      type: 'warning',
+      message: `Close "${d.name}"? Its ${n} markup${n > 1 ? 's' : ''} will be removed.`,
+      detail: "This can't be undone. Save a copy first if you want to keep them.",
+      buttons: ['Close PDF', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    if (r !== 0) return;
+  }
   viewer.unloadDocument(docId);
   const p = store.project;
   p.documents = p.documents.filter((x) => x.id !== docId);
@@ -350,6 +422,7 @@ async function removeDocument(docId) {
     if (first) await goToPage(first);
   }
   emit('documents');
+  toast(`Closed ${d.name}`, { timeout: 1600 });
 }
 
 // ---------- Pages ----------
@@ -380,10 +453,8 @@ async function goToPage(key) {
     console.error(e);
     toast("Couldn't render that sheet.", { kind: 'err' });
   }
-  markSheetActive();
+  renderSheets();
   refresh('ui');
-  const el = document.querySelector(`.sheet[data-key="${key}"]`);
-  if (el) el.scrollIntoView({ block: 'nearest' });
 }
 
 function stepPage(d) {
@@ -548,7 +619,7 @@ function pickCondition(type, anchor) {
 
 function toggleSnap() {
   snapOn = !snapOn;
-  localStorage.setItem('gridline-snap', snapOn ? 'on' : 'off');
+  setPref('gridline-snap', snapOn ? 'on' : 'off');
   snapHit = null;
   redraw();
   updateToolbar();
@@ -586,7 +657,7 @@ function pagePoint(e, anchor, { snap = false, exclude = null } = {}) {
     for (const q of m.points) extra.push(q);
   }
   if (draft && draft.points.length > 1) extra.push(draft.points[0]); // close back onto the start
-  const hit = findSnap(snapIndex, raw, 10 / view.zoom, extra);
+  const hit = findSnap(snapIndex, raw, snapRadius / view.zoom, extra);
   snapHit = hit;
   return hit ? hit.point : raw;
 }
@@ -845,7 +916,7 @@ document.addEventListener('keydown', (e) => {
   const k = e.key;
   if (e.ctrlKey || e.metaKey) {
     if (!api.__shim) return; // Electron menu accelerators handle these.
-    const map = { s: () => saveProject(e.shiftKey), o: () => openProject(), z: () => menuCmd('undo'), y: () => menuCmd('redo'), e: () => exportCsv() };
+    const map = { s: () => saveProject(e.shiftKey), o: () => openProject(), z: () => menuCmd('undo'), y: () => menuCmd('redo'), e: () => exportCsv(), w: () => closeProject(), ',': () => openSettings() };
     if (map[k.toLowerCase()]) {
       e.preventDefault();
       map[k.toLowerCase()]();
@@ -938,6 +1009,7 @@ $('#btnOpen').onclick = () => openProject();
 $('#emptyOpen').onclick = () => openProject();
 $('#btnSave').onclick = () => saveProject();
 $('#btnTheme').onclick = toggleTheme;
+$('#btnSettings').onclick = openSettings;
 $('#btnNewCond').onclick = () => newCondition();
 $('#condSearch').addEventListener('input', renderConditions);
 $('#projectName').addEventListener('change', (e) => {
@@ -1000,6 +1072,12 @@ function menuCmd(name, arg) {
   switch (name) {
     case 'new':
       return newProject();
+    case 'close-project':
+      return closeProject();
+    case 'close-drawing':
+      return closeCurrentDrawing();
+    case 'settings':
+      return openSettings();
     case 'open':
       return openProject();
     case 'open-project-path':

@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('gridline', {
     check: () => ipcRenderer.invoke('updater:check'),
     state: () => ipcRenderer.invoke('updater:state'),
     install: () => ipcRenderer.send('updater:install'),
+    setAuto: (on) => ipcRenderer.send('updater:set-auto', !!on),
     onState: (fn) => ipcRenderer.on('updater:state', (_e, s) => fn(s)),
   },
 });

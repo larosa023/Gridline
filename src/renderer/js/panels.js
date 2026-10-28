@@ -26,52 +26,110 @@ export function primaryQty(c, t = totalsFor(c)) {
 }
 
 // ---------------- Sheets ----------------
+// Sheet list modes: 'all' lists every page; 'current' shows only the page being viewed.
+// Each PDF can also be expanded/collapsed on its own with its arrow.
+export function sheetMode() {
+  return store.ui.sheetMode || 'all';
+}
+
+export function setSheetMode(mode) {
+  store.ui.sheetMode = mode;
+  store.ui.docOpen = new Map();
+  try {
+    localStorage.setItem('gridline-sheets', mode);
+  } catch {}
+  renderSheets();
+}
+
+function docExpanded(docId) {
+  const o = store.ui.docOpen && store.ui.docOpen.get(docId);
+  return o != null ? o : sheetMode() === 'all';
+}
+
 export function renderSheets() {
   const list = $('#sheetList');
   const p = store.project;
-  $('#sheetCount').textContent = Object.keys(p.pages).length;
+  const total = Object.keys(p.pages).length;
+  $('#sheetCount').textContent = total;
+  if (!store.ui.docOpen) store.ui.docOpen = new Map();
   if (!p.documents.length) {
     list.innerHTML = `<div class="empty-list">No drawings yet.<br/>Add PDFs to get started.</div>`;
     return;
   }
   const frag = document.createDocumentFragment();
+  const mode = sheetMode();
+  const bar = h(`<div class="sheets-bar">
+    <span class="muted small">${total} sheet${total === 1 ? '' : 's'}${p.documents.length > 1 ? ` · ${p.documents.length} PDFs` : ''}</span>
+    <div class="mini-seg" role="group" aria-label="Sheet list">
+      <button data-mode="all" class="${mode === 'all' ? 'on' : ''}" title="Show every page">${icon('sheets', 14)}All</button>
+      <button data-mode="current" class="${mode === 'current' ? 'on' : ''}" title="Show only the page you're on">${icon('file', 14)}Current</button>
+    </div></div>`);
+  bar.querySelectorAll('[data-mode]').forEach((b) => (b.onclick = () => setSheetMode(b.dataset.mode)));
+  frag.append(bar);
+
   for (const d of p.documents) {
-    const head = h(`<div class="doc-head">${icon('file', 13)}<span title="${esc(d.name)}">${esc(d.name)}</span>
-      <button class="icon-btn" title="Remove drawing set">${icon('trash', 14)}</button></div>`);
-    head.querySelector('button').onclick = () => actions.removeDocument(d.id);
-    frag.append(head);
     const keys = Object.keys(p.pages).filter((k) => k.startsWith(d.id + ':'));
     keys.sort((a, b) => +a.split(':')[1] - +b.split(':')[1]);
-    for (const key of keys) {
-      const pg = p.pages[key];
-      const n = key.split(':')[1];
-      const marks = p.markups.filter((m) => m.pageKey === key).length;
-      const row = h(`<div class="sheet ${key === store.ui.pageKey ? 'active' : ''}" data-key="${key}">
-        <div class="thumb"></div>
-        <div class="sheet-meta">
-          <div class="sheet-name" title="Double-click to rename">${esc(pg.name || 'Page ' + n)}</div>
-          <div class="sheet-sub">
-            ${pg.scale ? `<span class="chip">${esc(pg.scale.label)}</span>` : `<span class="chip warn">No scale</span>`}
-            ${marks ? `<span>${marks} markup${marks > 1 ? 's' : ''}</span>` : ''}
-          </div>
-        </div></div>`);
-      row.onclick = () => actions.goToPage(key);
-      row.querySelector('.sheet-name').ondblclick = (e) => {
-        e.stopPropagation();
-        renameSheet(row, key);
-      };
-      row.oncontextmenu = (e) => {
-        e.preventDefault();
-        contextMenu(e.clientX, e.clientY, [
-          { label: 'Rename sheet', icon: 'tag', run: () => renameSheet(row, key) },
-          { label: 'Copy scale to all sheets', icon: 'copy', run: () => actions.copyScaleToAll(key) },
-        ]);
-      };
-      frag.append(row);
-      requestThumb(key, row.querySelector('.thumb'));
+    const open = docExpanded(d.id);
+    const activeHere = keys.includes(store.ui.pageKey);
+    const pos = activeHere ? keys.indexOf(store.ui.pageKey) + 1 : 0;
+    const head = h(`<div class="doc-head ${open ? 'open' : ''}">
+      <button class="icon-btn chev" title="${open ? 'Show only the current page' : 'Show all pages'}">${icon(open ? 'caret' : 'chevronR', 14)}</button>
+      <span class="doc-name" title="${esc(d.name)}">${esc(d.name)}</span>
+      <span class="doc-count">${activeHere && !open ? `${pos} / ${keys.length}` : keys.length}</span>
+      <button class="icon-btn close-doc" title="Close this PDF">${icon('x', 14)}</button></div>`);
+    const toggle = () => {
+      store.ui.docOpen.set(d.id, !open);
+      renderSheets();
+    };
+    head.querySelector('.chev').onclick = toggle;
+    head.querySelector('.doc-name').onclick = toggle;
+    head.querySelector('.close-doc').onclick = () => actions.removeDocument(d.id);
+    frag.append(head);
+
+    const shown = open ? keys : keys.filter((k) => k === store.ui.pageKey);
+    for (const key of shown) frag.append(sheetRow(key, d));
+    if (!open && !activeHere) {
+      const more = h(`<button class="sheet-more">${keys.length} sheet${keys.length === 1 ? '' : 's'} — show</button>`);
+      more.onclick = toggle;
+      frag.append(more);
     }
   }
   list.replaceChildren(frag);
+  const act = list.querySelector('.sheet.active');
+  if (act) act.scrollIntoView({ block: 'nearest' });
+}
+
+function sheetRow(key, d) {
+  const p = store.project;
+  const pg = p.pages[key];
+  const n = key.split(':')[1];
+  const marks = p.markups.filter((m) => m.pageKey === key).length;
+  const row = h(`<div class="sheet ${key === store.ui.pageKey ? 'active' : ''}" data-key="${key}">
+    <div class="thumb"></div>
+    <div class="sheet-meta">
+      <div class="sheet-name" title="Double-click to rename">${esc(pg.name || 'Page ' + n)}</div>
+      <div class="sheet-sub">
+        ${pg.scale ? `<span class="chip">${esc(pg.scale.label)}</span>` : `<span class="chip warn">No scale</span>`}
+        ${marks ? `<span>${marks} markup${marks > 1 ? 's' : ''}</span>` : ''}
+      </div>
+    </div></div>`);
+  row.onclick = () => actions.goToPage(key);
+  row.querySelector('.sheet-name').ondblclick = (e) => {
+    e.stopPropagation();
+    renameSheet(row, key);
+  };
+  row.oncontextmenu = (e) => {
+    e.preventDefault();
+    contextMenu(e.clientX, e.clientY, [
+      { label: 'Rename sheet', icon: 'tag', run: () => renameSheet(row, key) },
+      { label: 'Copy scale to all sheets', icon: 'copy', run: () => actions.copyScaleToAll(key) },
+      '-',
+      { label: `Close "${d.name}"`, icon: 'x', danger: true, run: () => actions.removeDocument(d.id) },
+    ]);
+  };
+  requestThumb(key, row.querySelector('.thumb'));
+  return row;
 }
 
 function renameSheet(row, key) {

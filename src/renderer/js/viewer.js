@@ -6,6 +6,7 @@ const BASE = new URL('../vendor/pdfjs/', import.meta.url).href;
 pdfjs.GlobalWorkerOptions.workerSrc = BASE + 'pdf.worker.min.mjs';
 
 const docs = new Map(); // docId -> PDFDocumentProxy
+const tasks = new Map(); // docId -> loading task (owns the worker-side document)
 const pageCache = new Map(); // pageKey -> PDFPageProxy
 
 export const view = {
@@ -44,6 +45,7 @@ export async function loadDocument(docId, bytes) {
   });
   const pdf = await task.promise;
   docs.set(docId, pdf);
+  tasks.set(docId, task);
   let labels = null;
   try {
     labels = await pdf.getPageLabels();
@@ -54,9 +56,16 @@ export async function loadDocument(docId, bytes) {
 }
 
 export function unloadDocument(docId) {
+  const task = tasks.get(docId);
   const pdf = docs.get(docId);
-  if (pdf) pdf.destroy();
+  try {
+    if (task && typeof task.destroy === 'function') task.destroy();
+    else if (pdf && typeof pdf.destroy === 'function') pdf.destroy();
+  } catch (e) {
+    console.warn('pdf cleanup', e);
+  }
   docs.delete(docId);
+  tasks.delete(docId);
   for (const k of [...pageCache.keys()]) if (k.startsWith(docId + ':')) pageCache.delete(k);
   for (const k of [...thumbCache.keys()]) if (k.startsWith(docId + ':')) thumbCache.delete(k);
   for (const k of [...snapCache.keys()]) if (k.startsWith(docId + ':')) snapCache.delete(k);

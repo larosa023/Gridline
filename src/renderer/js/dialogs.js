@@ -254,3 +254,71 @@ export function aboutDialog(version, onCheck) {
     },
   });
 }
+
+/**
+ * Settings. `app` = current app preferences, `proj` = current project settings + unit.
+ * Resolves to { app, proj, makeDefault } or null.
+ */
+export function settingsDialog({ app, proj, version, hasProject, onCheckUpdates }) {
+  const opt = (v, cur, label) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${label}</option>`;
+  const toggle = (name, on, label, hint = '') =>
+    `<label class="setting-row"><span><b>${label}</b>${hint ? `<small>${hint}</small>` : ''}</span><input type="checkbox" class="switch" name="${name}" ${on ? 'checked' : ''} /></label>`;
+  return modal({
+    title: 'Settings',
+    wide: true,
+    buttons: [
+      { label: 'Cancel', value: null },
+      { label: 'Save settings', primary: true },
+    ],
+    build(body) {
+      const n = h(`<div class="settings">
+        <div class="settings-group">
+          <h3>App</h3>
+          <label class="setting-row"><span><b>Theme</b></span><select name="theme">${opt('dark', app.theme, 'Dark')}${opt('light', app.theme, 'Light')}${opt('system', app.theme, 'Match Windows')}</select></label>
+          ${toggle('snap', app.snap, 'Snap to plan lines', 'Pull points onto wall corners and lines in the PDF. Hold Ctrl to place a free point.')}
+          <label class="setting-row"><span><b>Snap strength</b><small>How close the cursor has to be before it grabs a line</small></span><select name="snapRadius">${opt('6', String(app.snapRadius), 'Light')}${opt('10', String(app.snapRadius), 'Normal')}${opt('16', String(app.snapRadius), 'Strong')}</select></label>
+          <label class="setting-row"><span><b>Sheet list</b><small>What the left panel shows for each PDF</small></span><select name="sheetMode">${opt('all', app.sheetMode, 'All pages')}${opt('current', app.sheetMode, 'Current page only')}</select></label>
+          ${toggle('autoUpdate', app.autoUpdate, 'Check for updates automatically', 'Updates download in the background; you choose when to restart.')}
+          <div class="setting-row"><span><b>Version</b><small>Gridline ${esc(version || '')}</small></span><button type="button" class="btn small" data-check>${icon('refresh', 14)} Check now</button></div>
+        </div>
+        <div class="settings-group ${hasProject ? '' : 'disabled'}">
+          <h3>This project</h3>
+          <label class="setting-row"><span><b>Units</b></span><select name="unit">${opt('ft', proj.unit, 'Imperial (ft, SF, CY)')}${opt('m', proj.unit, 'Metric (m, m², m³)')}</select></label>
+          <label class="setting-row"><span><b>Length display</b></span><select name="labelStyle">${opt('ftin', proj.labelStyle, `Feet-inches (12'-6")`)}${opt('decimal', proj.labelStyle, 'Decimal (12.50 LF)')}</select></label>
+          ${toggle('showLabels', proj.showLabels, 'Show quantities on the drawing')}
+          <div class="setting-row"><span><b>Estimate markups</b><small>Sales tax on material, overhead, profit</small></span>
+            <span class="pct-inputs">
+              <label><input name="taxPct" type="number" step="any" min="0" value="${proj.taxPct}" /><i>% tax</i></label>
+              <label><input name="overheadPct" type="number" step="any" min="0" value="${proj.overheadPct}" /><i>% OH</i></label>
+              <label><input name="profitPct" type="number" step="any" min="0" value="${proj.profitPct}" /><i>% profit</i></label>
+            </span></div>
+          ${toggle('makeDefault', false, 'Use these project settings for new projects')}
+        </div>
+      </div>`);
+      n.querySelector('[data-check]').onclick = onCheckUpdates;
+      body.append(n);
+    },
+    onSubmit(form) {
+      const f = new FormData(form);
+      const on = (k) => form.querySelector(`[name=${k}]`).checked;
+      return {
+        app: {
+          theme: f.get('theme'),
+          snap: on('snap'),
+          snapRadius: +f.get('snapRadius'),
+          sheetMode: f.get('sheetMode'),
+          autoUpdate: on('autoUpdate'),
+        },
+        proj: {
+          unit: f.get('unit'),
+          labelStyle: f.get('labelStyle'),
+          showLabels: on('showLabels'),
+          taxPct: +f.get('taxPct') || 0,
+          overheadPct: +f.get('overheadPct') || 0,
+          profitPct: +f.get('profitPct') || 0,
+        },
+        makeDefault: on('makeDefault'),
+      };
+    },
+  });
+}

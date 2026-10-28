@@ -8,6 +8,7 @@ const CHECK_EVERY_MS = 4 * 60 * 60 * 1000;
 let win = null;
 let state = { status: 'idle' };
 let manualCheck = false;
+let autoEnabled = true;
 
 function send(next) {
   state = { ...state, manual: manualCheck, ...next };
@@ -60,13 +61,18 @@ function init(window) {
 
   ipcMain.handle('updater:check', () => check(true));
   ipcMain.handle('updater:state', () => state);
+  ipcMain.on('updater:set-auto', (_e, on) => {
+    autoEnabled = !!on;
+    autoUpdater.autoDownload = true;
+  });
   ipcMain.on('updater:install', () => {
     // Silent install, then relaunch Gridline on the new version.
     setImmediate(() => autoUpdater.quitAndInstall(true, true));
   });
 
-  win.webContents.once('did-finish-load', () => setTimeout(() => check(false), 4000));
-  setInterval(() => check(false), CHECK_EVERY_MS);
+  const autoCheck = () => autoEnabled && check(false);
+  win.webContents.once('did-finish-load', () => setTimeout(autoCheck, 4000));
+  setInterval(autoCheck, CHECK_EVERY_MS);
 }
 
 function notesText(notes) {

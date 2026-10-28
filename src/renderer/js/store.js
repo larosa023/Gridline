@@ -7,13 +7,24 @@ export function uid(prefix = 'id') {
   return prefix + '_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
 }
 
+function savedDefaults() {
+  try {
+    return JSON.parse(localStorage.getItem('gridline-project-defaults') || 'null') || {};
+  } catch {
+    return {};
+  }
+}
+
 export function blankProject() {
+  const d = savedDefaults();
+  const settings = { taxPct: 0, overheadPct: 10, profitPct: 10, labelStyle: 'ftin', showLabels: true };
+  for (const k of Object.keys(settings)) if (d[k] != null) settings[k] = d[k];
   return {
     app: 'gridline',
     format: 1,
     name: 'Untitled project',
-    unit: 'ft',
-    settings: { taxPct: 0, overheadPct: 10, profitPct: 10, labelStyle: 'ftin', showLabels: true },
+    unit: d.unit === 'm' ? 'm' : 'ft',
+    settings,
     documents: [], // { id, name, data (base64) }
     pages: {}, // pageKey -> { name, scale: { ptPerUnit, unit, label } }
     conditions: [], // { id, name, type, color, group, height, depth, waste, matCost, laborCost, costBasis, notes }
