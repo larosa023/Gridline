@@ -23,7 +23,7 @@
     <div class="topbar-right">
       <button id="updatePill" class="update-pill" hidden></button>
       <button class="btn ghost" id="btnAsk" title="Ask the assistant to do it ( / )" data-icon="sparkle">Ask</button>
-      <button class="btn ghost icon-only" id="btnTheme" title="Toggle theme (Ctrl+Shift+T)" data-icon="moon"></button>
+      <button class="btn ghost icon-only" id="btnTheme" title="Appearance: theme, accent, dark drawings"></button>
       <button class="btn ghost icon-only" id="btnSettings" title="Settings (Ctrl+,)" data-icon="gear"></button>
       <button class="btn ghost" id="btnOpen" data-icon="folder">Open</button>
       <button class="btn" id="btnAddPdf" data-icon="filePlus">Add drawings</button>
@@ -47,6 +47,7 @@
             <span data-icon="search" data-size="15"></span>
             <input id="condSearch" placeholder="Filter conditions" />
           </div>
+          <button class="btn small" id="btnLibrary" data-icon="layers" data-size="15" title="Condition library — reuse conditions across projects">Library</button>
           <button class="btn small primary" id="btnNewCond" data-icon="plus" data-size="15">New</button>
         </div>
         <div class="cond-list" id="condList"></div>
@@ -116,7 +117,8 @@
               <button class="btn primary" id="emptyAdd" data-icon="filePlus">Add drawings</button>
               <button class="btn" id="emptyOpen" data-icon="folder">Open project</button>
             </div>
-            <p class="muted small">Tip: drag &amp; drop PDFs anywhere in the window.</p>
+            <div class="recent" id="recentList" hidden></div>
+            <p class="muted small">Tip: drag &amp; drop PDFs anywhere in the window · <kbd>Ctrl</kbd>+<kbd>K</kbd> finds any command.</p>
           </div>
         </div>
         <button class="edge-toggle left" id="toggleLeft" title="Hide sheets & conditions ( [ )"></button>
@@ -133,6 +135,7 @@
         <span class="grow"></span>
         <span id="statusCursor"></span>
         <span id="statusScale"></span>
+        <span id="statusSaved" class="muted"></span>
         <span id="statusVersion" class="muted"></span>
       </footer>
     </section>

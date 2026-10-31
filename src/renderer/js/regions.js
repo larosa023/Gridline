@@ -129,6 +129,7 @@ export function findHoles(labels, w, id, box, mask = null) {
 // ---------- High level ----------
 
 const cache = new Map(); // token -> { pageKey, m, labels, regions, index }
+const fullCache = new Map(); // `${pageKey}|${gap}|${mode}` -> full-sheet labeling
 let tokenN = 0;
 
 function angleOf(index, i) {
@@ -145,11 +146,32 @@ function angleOf(index, i) {
 export function findRegions(pageKey, index, pageW, pageH, rectPt, { k, mode = 'outline', minArea = 4, textItems = [], gap = 'small' } = {}) {
   const m = getMask(pageKey, index, pageW, pageH, gap, mode);
   const s = m.s;
-  const rx0 = Math.max(0, Math.floor(rectPt[0] * s)),
-    ry0 = Math.max(0, Math.floor(rectPt[1] * s));
-  const rx1 = Math.min(m.w, Math.ceil((rectPt[0] + rectPt[2]) * s)),
-    ry1 = Math.min(m.h, Math.ceil((rectPt[1] + rectPt[3]) * s));
-  const { labels, regions } = labelRegions(m.mask, m.w, m.h, [rx0, ry0, rx1, ry1]);
+  // Label the whole sheet (cached), then keep the zones that belong to the requested area.
+  // This way a zone is never cut off by an imprecise view box.
+  const fkey = `${pageKey}|${gap}|${mode}`;
+  let full = fullCache.get(fkey);
+  if (!full || full.m !== m) {
+    full = { m, ...labelRegions(m.mask, m.w, m.h, [0, 0, m.w, m.h]) };
+    fullCache.set(fkey, full);
+    while (fullCache.size > 2) fullCache.delete(fullCache.keys().next().value);
+  }
+  const { labels } = full;
+  // A zone belongs to the area when its centre is inside it and it doesn't sprawl far beyond it
+  // (that rules out the paper background inside the sheet border).
+  const mx0 = rectPt[0] - Math.min(rectPt[2] * 0.25, 120),
+    my0 = rectPt[1] - Math.min(rectPt[3] * 0.25, 120);
+  const mx1 = rectPt[0] + rectPt[2] + Math.min(rectPt[2] * 0.25, 120),
+    my1 = rectPt[1] + rectPt[3] + Math.min(rectPt[3] * 0.25, 120);
+  const regions = full.regions.filter((r) => {
+    const cx = r.sx / r.count / s,
+      cy = r.sy / r.count / s;
+    if (cx < rectPt[0] || cy < rectPt[1] || cx > rectPt[0] + rectPt[2] || cy > rectPt[1] + rectPt[3]) return false;
+    return r.minx / s >= mx0 && r.miny / s >= my0 && r.maxx / s <= mx1 && r.maxy / s <= my1;
+  });
+  const rx0 = Math.max(0, Math.floor(mx0 * s)),
+    ry0 = Math.max(0, Math.floor(my0 * s));
+  const rx1 = Math.min(m.w, Math.ceil(mx1 * s)),
+    ry1 = Math.min(m.h, Math.ceil(my1 * s));
   const token = 'R' + ++tokenN;
   cache.set(token, { pageKey, m, labels, regions, index, k, textItems });
   // Each entry holds a full-sheet label map (~25 MB); keep only the latest few.
@@ -186,7 +208,8 @@ export function findRegions(pageKey, index, pageW, pageH, rectPt, { k, mode = 'o
   }
 
   const ptsArea = (count) => count / (s * s) / (k * k);
-  const byId = new Map(regions.map((r) => [r.id, r]));
+  const byId = new Map(full.regions.map((r) => [r.id, r]));
+  const kept = new Set(regions.map((r) => r.id));
   // Which zone does each piece of text belong to? Text inside a small closed shape (a tag
   // bubble) belongs to the zone surrounding that bubble.
   const tagsOf = new Map();
@@ -215,7 +238,7 @@ export function findRegions(pageKey, index, pageW, pageH, rectPt, { k, mode = 'o
       id = best ? best[0] : 0;
       r = byId.get(id);
     }
-    if (!r || r.open) continue;
+    if (!r || r.open || !kept.has(id)) continue;
     if (!tagsOf.has(id)) tagsOf.set(id, []);
     const arr = tagsOf.get(id);
     if (arr.length < 8 && !arr.includes(t.str)) arr.push(t.str);
@@ -275,13 +298,16 @@ function describeHatch(density, angles) {
 
 /** Same pattern? Used for "measure every zone like this one". */
 export function similarSignature(a, b) {
+  if (!a || !b) return false;
   if (!a.density && !b.density) return true;
   if (!a.density || !b.density) return false;
+  // Hatch density ~ 1 / line spacing, so this compares spacing: brick coursing vs siding
+  // laps differ by far more than 20%.
   const ratio = a.density / b.density;
-  if (ratio < 0.6 || ratio > 1.67) return false;
-  const sa = new Set(a.angles),
-    sb = new Set(b.angles);
-  return [...sa].some((x) => sb.has(x));
+  if (ratio < 0.83 || ratio > 1.2) return false;
+  const sa = [...a.angles].sort().join(','),
+    sb = [...b.angles].sort().join(',');
+  return sa === sb;
 }
 
 /**

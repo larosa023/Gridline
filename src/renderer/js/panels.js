@@ -66,6 +66,32 @@ export function renderSheets() {
     </div></div>`);
   bar.querySelectorAll('[data-mode]').forEach((b) => (b.onclick = () => setSheetMode(b.dataset.mode)));
   frag.append(bar);
+  const q = (store.ui.sheetFilter || '').trim().toLowerCase();
+  if (total > 4) {
+    const f = h(`<div class="sheet-filter">${icon('search', 14)}<input placeholder="Find sheet (e.g. A-2, ELEV)" value="${esc(store.ui.sheetFilter || '')}" /></div>`);
+    const inp = f.querySelector('input');
+    inp.addEventListener('input', () => {
+      store.ui.sheetFilter = inp.value;
+      renderSheets();
+      const again = document.querySelector('.sheet-filter input');
+      if (again) {
+        again.focus();
+        again.setSelectionRange(again.value.length, again.value.length);
+      }
+    });
+    inp.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        store.ui.sheetFilter = '';
+        renderSheets();
+      }
+      if (e.key === 'Enter') {
+        const first = document.querySelector('.sheet[data-key]');
+        if (first) actions.goToPage(first.dataset.key);
+      }
+    });
+    frag.append(f);
+  }
 
   for (const d of p.documents) {
     const keys = Object.keys(p.pages).filter((k) => k.startsWith(d.id + ':'));
@@ -87,9 +113,14 @@ export function renderSheets() {
     head.querySelector('.close-doc').onclick = () => actions.removeDocument(d.id);
     frag.append(head);
 
-    const shown = open ? keys : keys.filter((k) => k === store.ui.pageKey);
+    const match = (k) => (p.pages[k].name || '').toLowerCase().includes(q);
+    const shown = q ? keys.filter(match) : open ? keys : keys.filter((k) => k === store.ui.pageKey);
+    if (q && !shown.length) {
+      frag.lastChild.remove(); // hide this PDF's header when nothing matches
+      continue;
+    }
     for (const key of shown) frag.append(sheetRow(key, d));
-    if (!open && !activeHere) {
+    if (!q && !open && !activeHere) {
       const more = h(`<button class="sheet-more">${keys.length} sheet${keys.length === 1 ? '' : 's'} — show</button>`);
       more.onclick = toggle;
       frag.append(more);
@@ -219,6 +250,7 @@ function condMenu(c, x, y) {
   contextMenu(x, y, [
     { label: 'Edit condition…', icon: 'tag', run: () => actions.editCondition(c.id) },
     { label: 'Duplicate', icon: 'copy', run: () => actions.duplicateCondition(c.id) },
+    { label: 'Save to library', icon: 'layers', run: () => actions.saveToLibrary([c.id]) },
     '-',
     { label: 'Delete condition & markups', icon: 'trash', danger: true, run: () => actions.deleteCondition(c.id) },
   ]);
@@ -233,6 +265,9 @@ export function renderInspector() {
   const u = UNIT_LABELS[p.unit];
   const parts = [];
 
+  if (m && m.review) {
+    parts.push(`<div class="insp-section"><div class="review-banner" style="margin:0">${icon('search', 15)}<div><b>Needs a look</b><br/>${esc(m.review)}<div class="row" style="margin-top:8px"><button class="btn small" data-act="review-ok">Looks right</button><button class="btn small ghost" data-act="review-next">Next flagged</button></div></div></div></div>`);
+  }
   if (c) {
     const cu = { ...c, unit: p.unit };
     const t = totalsFor(c);
@@ -289,7 +324,8 @@ export function renderInspector() {
     <div class="insp-section">
       <div class="insp-title">Properties</div>
       <div class="fields">
-        <label class="field full"><span>Group / division</span><input data-f="group" value="${esc(c.group || '')}" placeholder="e.g. 03 – Concrete" /></label>
+        <label class="field"><span>Group / division</span><input data-f="group" value="${esc(c.group || '')}" placeholder="e.g. 03 – Concrete" /></label>
+        <label class="field"><span>Finish tag</span><input data-f="tag" value="${esc(c.tag || '')}" placeholder="e.g. BR-1" /></label>
         ${c.type === 'linear' || c.type === 'area' ? `<label class="field"><span>Height</span><input data-f="height" value="${c.height ? (p.unit === 'm' ? c.height : formatFeetInches(c.height)) : ''}" placeholder="—" /></label>` : ''}
         ${c.type === 'roof' || (c.type === 'linear' && c.roofLine) ? `<label class="field"><span>Pitch</span><input data-f="pitch" value="${formatPitch(+c.pitch || 0)}" placeholder="6/12" /></label>` : ''}
         ${c.type === 'linear' ? `<label class="field"><span>Roof line</span><select data-f="roofLine"><option value="">Flat</option><option value="rake" ${c.roofLine === 'rake' ? 'selected' : ''}>Rake</option><option value="hip" ${c.roofLine === 'hip' ? 'selected' : ''}>Hip / valley</option></select></label>` : ''}
@@ -321,6 +357,7 @@ export function renderInspector() {
     if (q.count != null) rows += `<div class="kv"><span>Count</span><b>${q.count}</b></div>`;
     parts.push(`<div class="insp-section">
       <div class="insp-title">Selected markup</div>
+
       <label class="field" style="margin-bottom:8px"><span>Label / view</span><input data-ml="label" value="${esc(m.label || '')}" placeholder="e.g. Elev 1 – Front" /></label>
       ${rows}
       <div class="row">
@@ -364,6 +401,7 @@ export function renderInspector() {
         v = v.trim() ? parseLength(v, p.unit) : 0;
         if (!isFinite(v) || v < 0) return renderInspector();
       } else if (['depth', 'waste', 'matCost', 'laborCost'].includes(f)) v = +v || 0;
+      else if (f === 'tag') v = v.trim().toUpperCase();
       else v = v.trim();
       if (f === 'name' && !v) return renderInspector();
       if (c[f] === v) return;
@@ -405,6 +443,11 @@ export function renderInspector() {
   act('new', () => actions.newCondition());
   act('delete', () => actions.deleteSelected());
   act('deduct', () => commit(() => (m.deduct = !m.deduct), 'markups'));
+  act('review-ok', () => {
+    commit(() => delete m.review, 'markups');
+    actions.reviewNext && actions.reviewNext(true);
+  });
+  act('review-next', () => actions.reviewNext && actions.reviewNext());
   const lab = el.querySelector('[data-act="labels"]');
   if (lab) lab.onchange = () => commit((pp) => (pp.settings.showLabels = lab.checked), 'settings');
 }

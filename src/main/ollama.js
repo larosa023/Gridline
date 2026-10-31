@@ -125,7 +125,8 @@ function init(window) {
           stream: false,
           keep_alive: '15m',
           ...(think != null ? { think } : {}),
-          options: { num_ctx: 24576, temperature: 0.2, ...(options || {}) },
+          // Low temperature = consistent, literal tool use. Context sized for a 24 GB GPU with a 27B model.
+          options: { num_ctx: 20480, temperature: 0.1, top_p: 0.9, repeat_penalty: 1.05, ...(options || {}) },
         }),
         signal: ac.signal,
       });

@@ -13,6 +13,8 @@ import { scaleFor } from './overlay.js';
 import { findRegions, regionOutline, regionsLike } from './regions.js';
 import { detectViews, titleBlockLeft } from './views.js';
 import { pointInPolygon } from './geometry.js';
+import { validateArgs, calc, parseSchedule, normTag, suggest } from './aitools.js';
+import { similarSignature } from './regions.js';
 
 export const RECOMMENDED_MODEL = 'qwen3.8:27b';
 export const RECOMMENDED_LABEL = 'Qwen 3.8 27B';
@@ -79,7 +81,11 @@ function resolveSheet(ref) {
   let hit = list.find((x) => (x.pg.name || '').toLowerCase() === s);
   if (!hit && /^\d+$/.test(s)) hit = list[+s - 1];
   if (!hit) hit = list.find((x) => (x.pg.name || '').toLowerCase().includes(s));
-  if (!hit) throw new Error(`No sheet named "${ref}". Sheets: ${list.map((x) => x.pg.name).join(', ')}`);
+  if (!hit) {
+    const names = list.map((x) => x.pg.name);
+    const sug = suggest(String(ref), names);
+    throw new Error(`No sheet named "${ref}".${sug.length ? ` Did you mean ${sug.map((x) => `"${x}"`).join(' or ')}?` : ''} Sheets: ${names.slice(0, 80).join(', ')}`);
+  }
   return hit.key;
 }
 
@@ -92,10 +98,16 @@ function resolveSheets(ref) {
 function resolveCondition(name, type) {
   if (!name) throw new Error('A condition name is required.');
   const s = String(name).trim().toLowerCase();
+  const tag = normTag(name);
   const c =
     store.project.conditions.find((x) => x.name.toLowerCase() === s) ||
+    // "BR-1" (just a tag) finds the condition carrying that tag
+    (tag && s.length <= 8 && store.project.conditions.find((x) => normTag(x.tag) === tag)) ||
     store.project.conditions.find((x) => x.name.toLowerCase().includes(s));
-  if (!c) throw new Error(`No condition named "${name}". Create it first with create_condition.`);
+  if (!c) {
+    const sug = suggest(String(name), store.project.conditions.map((x) => x.name));
+    throw new Error(`No condition named "${name}".${sug.length ? ` Did you mean ${sug.map((x) => `"${x}"`).join(' or ')}?` : ' Create it first with create_condition.'}`);
+  }
   if (type && ![].concat(type).includes(c.type)) throw new Error(`"${c.name}" is a ${c.type} condition; this needs ${[].concat(type).join(' or ')}.`);
   return c;
 }
@@ -129,7 +141,9 @@ const textCenter = (it) => [it.x + it.w / 2, it.y - it.h * 0.35];
 function summarizeCondition(c) {
   const t = totalsFor(c);
   const u = UNIT_LABELS[store.project.unit];
-  const o = { name: c.name, type: c.type, group: c.group || '', markups: t.markups, quantity: primaryQty(c, t) };
+  const o = { name: c.name, type: c.type, ...(c.tag ? { tag: c.tag } : {}), group: c.group || '', markups: t.markups, quantity: primaryQty(c, t) };
+  const flagged = store.project.markups.filter((m) => m.conditionId === c.id && m.review).length;
+  if (flagged) o.needs_review = flagged;
   if (c.type === 'linear') o.length = +t.length.toFixed(2);
   if (c.type === 'area') Object.assign(o, { area: +t.area.toFixed(2), perimeter: +t.perimeter.toFixed(2) });
   if (c.type === 'roof') Object.assign(o, { pitch: formatPitch(+c.pitch || 0), roof_area: +t.area.toFixed(2), squares: +t.squares.toFixed(2), plan_area: +t.planArea.toFixed(2) });
@@ -164,6 +178,12 @@ async function resolveArea(key, args) {
 function addMarkups(list) {
   if (!list.length) return;
   commit((pp) => list.forEach((m) => pp.markups.push(m)), 'markups');
+}
+
+function findZoneInfo(id) {
+  const token = String(id).split('.')[0];
+  const L = state.regionLists.get(token);
+  return L ? L.list.find((z) => z.id === id) : null;
 }
 
 const LABEL_PROP = { label: { type: 'string', description: 'Where this is, e.g. "Elev 1 – Front" or "Unit 2B". Shown in the estimate breakdown.' } };
@@ -216,6 +236,7 @@ const TOOL_DEFS = [
         name: { type: 'string' },
         type: { type: 'string', enum: ['linear', 'area', 'roof', 'count'] },
         group: { type: 'string', description: 'CSI division or trade, e.g. "09 – Finishes"' },
+        tag: { type: 'string', description: 'Finish / spec tag used on the drawings, e.g. "BR-1". Lets measure_by_tags assign zones automatically.' },
         height_ft: { type: 'number', description: 'Linear: wall height for wall SF' },
         depth_in: { type: 'number', description: 'Area: thickness in inches for CY' },
         pitch: { type: 'string', description: 'Roof: e.g. 6/12' },
@@ -235,6 +256,7 @@ const TOOL_DEFS = [
         name: { type: 'string', description: 'Existing condition name' },
         new_name: { type: 'string' },
         group: { type: 'string' },
+        tag: { type: 'string' },
         height_ft: { type: 'number' },
         depth_in: { type: 'number' },
         pitch: { type: 'string' },
@@ -279,6 +301,59 @@ const TOOL_DEFS = [
       properties: { sheet: { type: 'string' }, condition: { type: 'string' }, points: { type: 'array', items: { type: 'array', items: { type: 'number' } } }, deduct: { type: 'boolean' }, ...LABEL_PROP },
       required: ['sheet', 'condition', 'points'],
     },
+  },
+  {
+    name: 'plan',
+    description:
+      'Write or update your step-by-step plan for this request. Call it first for any multi-step job, then again as steps finish (mark them done). The estimator sees it as a checklist.',
+    parameters: {
+      type: 'object',
+      properties: { steps: { type: 'array', items: { type: 'string' } }, done: { type: 'array', items: { type: 'number' }, description: '0-based indexes of finished steps' } },
+      required: ['steps'],
+    },
+  },
+  {
+    name: 'search_project',
+    description: 'Search the text of every sheet in the project (e.g. "FINISH SCHEDULE", "BR-1", "DOOR SCHEDULE"). Returns which sheets contain it and where.',
+    parameters: { type: 'object', properties: { text: { type: 'string' }, whole_word: { type: 'boolean' } }, required: ['text'] },
+  },
+  {
+    name: 'read_schedule',
+    description:
+      'Read a schedule or table (finish, door, window, room, fixture schedule) into rows and columns. Give the sheet and the schedule title or part of it. Much more reliable than reading raw text.',
+    parameters: { type: 'object', properties: { sheet: { type: 'string' }, title: { type: 'string', description: 'e.g. "FINISH SCHEDULE"' } }, required: ['sheet'] },
+  },
+  {
+    name: 'calculate',
+    description: 'Exact arithmetic. Use for any math: totals, conversions, waste, unit costs. Supports + - * / ^ ( ), %, and feet-inches like 12\'-6".',
+    parameters: { type: 'object', properties: { expression: { type: 'string' } }, required: ['expression'] },
+  },
+  {
+    name: 'remember',
+    description: 'Save a short project fact for later requests (e.g. "BR-1 = brick veneer per A-701", "deduct all openings"). Saved with the project.',
+    parameters: { type: 'object', properties: { note: { type: 'string' } }, required: ['note'] },
+  },
+  {
+    name: 'measure_by_tags',
+    description:
+      'Most precise way to take off finishes on elevations or plans: finds every closed zone in a view, reads the finish tag inside each zone, and measures it into the condition with that tag (conditions need a tag, e.g. "BR-1"). Openings are deducted. Zones it cannot assign are returned for you to decide.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sheet: { type: 'string' },
+        view: { type: 'string', description: 'View number or title from list_views (optional)' },
+        box: { type: 'array', items: { type: 'number' } },
+        deduct_openings: { type: 'boolean' },
+        use_hatch_matching: { type: 'boolean', description: 'Also assign untagged zones whose hatch pattern matches a tagged zone in the same view (flagged for review). Default true.' },
+        ...LABEL_PROP,
+      },
+      required: ['sheet'],
+    },
+  },
+  {
+    name: 'show',
+    description: 'Show the estimator something: open a sheet and zoom to a box (page points) or a view.',
+    parameters: { type: 'object', properties: { sheet: { type: 'string' }, view: { type: 'string' }, box: { type: 'array', items: { type: 'number' } } }, required: ['sheet'] },
   },
   {
     name: 'list_views',
@@ -426,7 +501,10 @@ async function runTool(name, args, out) {
       const type = args.type;
       if (!['linear', 'area', 'roof', 'count'].includes(type)) throw new Error('type must be linear, area, roof or count');
       const existing = p.conditions.find((c) => c.name.toLowerCase() === String(args.name).toLowerCase());
-      if (existing) return { ok: true, note: 'Already exists; using it.', condition: summarizeCondition(existing) };
+      if (existing) {
+        if (args.tag && !existing.tag) commit(() => (existing.tag = normTag(args.tag) || ''), 'conditions');
+        return { ok: true, note: 'Already exists; using it.', condition: summarizeCondition(existing) };
+      }
       let pitch = 0;
       if (type === 'roof') {
         pitch = parsePitch(args.pitch ?? '6/12');
@@ -438,6 +516,7 @@ async function runTool(name, args, out) {
         type,
         color: nextColor(),
         group: args.group || '',
+        tag: normTag(args.tag) || '',
         height: type === 'linear' || type === 'area' ? +args.height_ft || 0 : 0,
         depth: type === 'area' ? +args.depth_in || 0 : 0,
         pitch,
@@ -457,6 +536,7 @@ async function runTool(name, args, out) {
       const patch = {};
       if (args.new_name) patch.name = String(args.new_name).trim();
       if (args.group != null) patch.group = String(args.group);
+      if (args.tag != null) patch.tag = normTag(args.tag) || '';
       if (args.height_ft != null) patch.height = +args.height_ft || 0;
       if (args.depth_in != null) patch.depth = +args.depth_in || 0;
       if (args.pitch != null) {
@@ -566,11 +646,170 @@ async function runTool(name, args, out) {
       const pts = (args.points || []).map((q) => [Number(q[0]), Number(q[1])]).filter((q) => q.every(isFinite));
       const need = c.type === 'linear' ? 2 : c.type === 'count' ? 1 : 3;
       if (pts.length < need) throw new Error(`${c.type} needs at least ${need} points`);
-      const extra = { ...(args.label ? { label: String(args.label) } : {}), ...(args.deduct && c.type !== 'linear' && c.type !== 'count' ? { deduct: true } : {}) };
+      const extra = {
+        ...(args.label ? { label: String(args.label) } : {}),
+        ...(args.deduct && c.type !== 'linear' && c.type !== 'count' ? { deduct: true } : {}),
+        review: 'Drawn from coordinates by the assistant — check it follows the drawing',
+      };
       const ms = c.type === 'count' ? pts.map((q) => ({ id: uid('mk'), conditionId: c.id, pageKey: key, type: 'count', points: [q], ...extra })) : [{ id: uid('mk'), conditionId: c.id, pageKey: key, type: c.type, points: pts, ...extra }];
       commit((pp) => ms.forEach((m) => pp.markups.push(m)), 'markups');
       out.changed = true;
       return { ok: true, condition: summarizeCondition(c) };
+    }
+    case 'plan': {
+      const steps = (args.steps || []).map(String).slice(0, 20);
+      const done = new Set((args.done || []).map(Number));
+      state.plan = { steps, done };
+      renderPlan();
+      return { ok: true, remaining: steps.filter((_, i) => !done.has(i)) };
+    }
+    case 'search_project': {
+      const q = String(args.text || '').trim();
+      if (!q) throw new Error('Give text to search for.');
+      const esc2 = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = args.whole_word === false ? new RegExp(esc2, 'i') : new RegExp(`(^|[^A-Za-z0-9])${esc2}([^A-Za-z0-9]|$)`, 'i');
+      const hits = [];
+      for (const x of sheetList()) {
+        const { items } = await viewer.getPageText(x.key);
+        const m = items.filter((it) => re.test(it.str));
+        if (m.length) hits.push({ sheet: x.pg.name, count: m.length, first: m.slice(0, 4).map((it) => ({ text: it.str.slice(0, 80), at: textCenter(it).map(Math.round) })) });
+      }
+      return { text: q, sheets_with_matches: hits.length, results: hits.slice(0, 40) };
+    }
+    case 'read_schedule': {
+      const key = resolveSheet(args.sheet);
+      const { items } = await viewer.getPageText(key);
+      const titles = args.title ? [String(args.title)] : ['FINISH SCHEDULE', 'SCHEDULE', 'LEGEND'];
+      let sch = null;
+      for (const t of titles) if ((sch = parseSchedule(items, { title: t }))) break;
+      if (!sch) {
+        const found = items.filter((it) => /SCHEDULE|LEGEND/i.test(it.str)).slice(0, 10).map((it) => it.str);
+        throw new Error(`No schedule titled "${args.title || 'SCHEDULE'}" on ${sheetName(key)}.${found.length ? ' Titles on this sheet: ' + found.join('; ') : ' Try search_project to find which sheet has it.'}`);
+      }
+      // Remember tags so later steps can match them.
+      return { sheet: sheetName(key), title: sch.title, columns: sch.columns, rows: sch.rows.slice(0, 80), row_count: sch.rows.length, box_pt: sch.box, note: sch.rows.length > 80 ? 'First 80 rows shown.' : undefined };
+    }
+    case 'calculate': {
+      const v = calc(args.expression);
+      return { expression: String(args.expression), result: +v.toFixed(6) };
+    }
+    case 'remember': {
+      const note = String(args.note || '').trim().slice(0, 300);
+      if (!note) throw new Error('Nothing to remember.');
+      const notes = (store.project.aiNotes = store.project.aiNotes || []);
+      if (!notes.includes(note)) notes.push(note);
+      if (notes.length > 40) notes.shift();
+      ctx.markDirty();
+      return { ok: true, notes: notes.length };
+    }
+    case 'show': {
+      const key = resolveSheet(args.sheet);
+      const area = await resolveArea(key, args);
+      if (store.ui.pageKey !== key) await ctx.goToPage(key);
+      viewer.fitRect(area.box);
+      return { ok: true, sheet: sheetName(key) };
+    }
+    case 'measure_by_tags': {
+      const key = resolveSheet(args.sheet);
+      const sc = scaleFor(key);
+      if (!sc) throw new Error(`Sheet ${sheetName(key)} has no scale yet. Set it first.`);
+      const byTag = new Map();
+      for (const c of p.conditions) if ((c.type === 'area' || c.type === 'roof') && normTag(c.tag)) byTag.set(normTag(c.tag), c);
+      if (!byTag.size) throw new Error('No area conditions have a tag yet. Create conditions with tag (e.g. tag "BR-1") from the finish schedule first.');
+      const area = await resolveArea(key, args);
+      const [idx, sz, { items }] = await Promise.all([viewer.getSnapIndex(key), viewer.pageSize(key), viewer.getPageText(key)]);
+      if (!idx || !idx.n) throw new Error('This sheet has no vector linework (probably a scan).');
+      const r = findRegions(key, idx, sz.w, sz.h, area.box, { k: sc.ptPerUnit, mode: 'outline', minArea: 4, textItems: items });
+      state.regionLists.set(r.token, { list: r.regions, key, view: area.name });
+      const zones = r.regions.filter((z) => !z.open);
+      const label = args.label ? String(args.label) : area.name ? area.name.replace(/^(\d+) – /, '$1 – ') : undefined;
+      const assigned = [];
+      const unassigned = [];
+      const conflicts = [];
+      for (const z of zones) {
+        const tags = [...new Set(z.tags.map(normTag).filter((t) => t && byTag.has(t)))];
+        if (tags.length === 1) assigned.push({ z, c: byTag.get(tags[0]), how: 'tag' });
+        else if (tags.length > 1) conflicts.push({ zone: z.id, tags, net_sf: z.area_sf });
+        else unassigned.push(z);
+      }
+      // Hatch matching for untagged zones (common: one tag per material per elevation).
+      const viaHatch = [];
+      if (args.use_hatch_matching !== false) {
+        // Reference patterns: tagged zones in this view, plus tagged zones measured earlier on any
+        // sheet (e.g. the brick on elevation 1 identifies untagged brick on elevation 2).
+        const refs = assigned.map((a) => ({ sig: a.z.signature, c: a.c }));
+        for (const m of p.markups) {
+          if (!m.sig || m.review || m.deduct) continue;
+          const c = condition(m.conditionId);
+          if (c && normTag(c.tag)) refs.push({ sig: m.sig, c });
+        }
+        for (const z of unassigned.slice()) {
+          if (!z.signature || !z.signature.density) continue;
+          const conds = [...new Set(refs.filter((r) => similarSignature(r.sig, z.signature)).map((r) => r.c))];
+          if (conds.length === 1) {
+            viaHatch.push({ z, c: conds[0], how: 'hatch' });
+            unassigned.splice(unassigned.indexOf(z), 1);
+          }
+        }
+      }
+      const made = [];
+      const per = new Map();
+      for (const a of assigned.concat(viaHatch)) {
+        const o = regionOutline(a.z.id);
+        const k = sc.ptPerUnit;
+        const gross = polygonArea(o.outer) / (k * k);
+        const cen = centroid(o.outer);
+        const dup = p.markups.find((m) => m.pageKey === key && m.conditionId === a.c.id && !m.deduct && pointInPolygon(cen, m.points) && Math.abs(polygonArea(m.points) / (k * k) - gross) < Math.max(0.5, gross * 0.01));
+        if (dup) continue;
+        const base = { conditionId: a.c.id, pageKey: key, type: a.c.type, ...(label ? { label } : {}) };
+        made.push({
+          id: uid('mk'),
+          ...base,
+          points: o.outer,
+          ...(a.z.signature && a.z.signature.density ? { sig: a.z.signature } : {}),
+          ...(a.how === 'hatch' ? { review: `No tag in this zone — matched to ${a.c.tag} (${a.c.name}) by its hatch pattern` } : {}),
+        });
+        let ded = 0;
+        if (args.deduct_openings !== false)
+          for (const hole of o.holes) {
+            ded += polygonArea(hole) / (k * k);
+            made.push({ id: uid('mk'), ...base, points: hole, deduct: true });
+          }
+        const e = per.get(a.c) || { condition: a.c.name, tag: a.c.tag, zones: 0, gross_sf: 0, openings_sf: 0, flagged: 0 };
+        e.zones++;
+        e.gross_sf += gross;
+        e.openings_sf += ded;
+        if (a.how === 'hatch') e.flagged++;
+        per.set(a.c, e);
+      }
+      addMarkups(made);
+      if (made.length) {
+        out.changed = true;
+        if (store.ui.pageKey !== key) await ctx.goToPage(key);
+      }
+      // Plain, untagged zones sitting inside a measured facade are windows, doors and storefront:
+      // they're openings (already deducted or excluded), not something to decide.
+      const measuredBoxes = assigned.concat(viaHatch).map((a) => a.z.box_pt);
+      const inside = (b, o) => b[0] >= o[0] - 3 && b[1] >= o[1] - 3 && b[0] + b[2] <= o[0] + o[2] + 3 && b[1] + b[3] <= o[1] + o[3] + 3;
+      const openings = [];
+      const toDecide = [];
+      for (const z of unassigned) {
+        if (!z.tags.length && (!z.signature || !z.signature.density) && measuredBoxes.some((o) => inside(z.box_pt, o))) openings.push(z);
+        else toDecide.push(z);
+      }
+      const big = toDecide.filter((z) => z.area_sf >= 10);
+      return {
+        sheet: sheetName(key),
+        view: area.name,
+        label: label || null,
+        measured: [...per.values()].map((e) => ({ ...e, gross_sf: +e.gross_sf.toFixed(1), openings_sf: +e.openings_sf.toFixed(1), net_sf: +(e.gross_sf - e.openings_sf).toFixed(1) })),
+        conflicts,
+        openings_found: { count: openings.length, sf: +openings.reduce((a, z) => a + z.area_sf, 0).toFixed(1), note: 'plain zones inside the facade — windows/doors/storefront, not wall finish' },
+        unassigned_zones: big.slice(0, 25).map((z) => ({ id: z.id, net_sf: z.area_sf, box_pt: z.box_pt, hatch: z.hatch, tags: z.tags })),
+        note: big.length
+          ? 'Unassigned zones have no matching tag. Decide each with look_at_sheet on its box: measure with measure_regions if it is a finish, skip if it is glazing, a door, or another trade.'
+          : 'All zones with finish tags were measured.',
+      };
     }
     case 'list_views': {
       const key = resolveSheet(args.sheet);
@@ -579,7 +818,7 @@ async function runTool(name, args, out) {
       return {
         sheet: sheetName(key),
         sheet_scale: sheetScale,
-        views: vs.map((v) => ({ number: v.number, title: v.title, scale: v.scale, box_pt: v.box, ...(v.scale && sheetScale && v.scale !== sheetScale ? { warning: `view scale ${v.scale} differs from sheet scale ${sheetScale}` } : {}) })),
+        views: vs.map((v) => ({ number: v.number, title: v.title, kind: v.kind, scale: v.scale, box_pt: v.box, ...(v.scale && sheetScale && v.scale !== sheetScale ? { warning: `view scale ${v.scale} differs from sheet scale ${sheetScale}` } : {}) })),
       };
     }
     case 'find_regions': {
@@ -633,7 +872,13 @@ async function runTool(name, args, out) {
           continue;
         }
         const label = args.label ? String(args.label) : undefined;
-        made.push({ id: uid('mk'), conditionId: c.id, pageKey: o.pageKey, type: c.type, points: o.outer, ...(label ? { label } : {}) });
+        // Flag zones whose finish tag doesn't match the condition's tag, and pattern-only matches.
+        let review = null;
+        const zoneInfo = findZoneInfo(id);
+        const zt = zoneInfo ? zoneInfo.tags.map(normTag).filter(Boolean) : [];
+        if (name === 'measure_similar' && !zt.length) review = 'Matched by hatch pattern only — confirm the material';
+        else if (c.tag && zt.length && !zt.includes(normTag(c.tag))) review = `Zone is tagged ${zt.join(', ')} but condition is ${c.tag}`;
+        made.push({ id: uid('mk'), conditionId: c.id, pageKey: o.pageKey, type: c.type, points: o.outer, ...(label ? { label } : {}), ...(review ? { review } : {}) });
         let ded = 0;
         if (args.deduct_openings !== false) {
           for (const hole of o.holes) {
@@ -741,31 +986,34 @@ async function runTool(name, args, out) {
 }
 
 function systemPrompt(vision) {
-  return `You are the takeoff assistant built into Gridline, a construction quantity takeoff and estimating app. You work for a professional estimator. You run entirely on their PC.
+  const notes = store.project.aiNotes || [];
+  const conds = store.project.conditions.map((c) => `${c.name} (${c.type}${c.tag ? ', tag ' + c.tag : ''})`).slice(0, 60);
+  return `You are the takeoff assistant inside Gridline, a construction quantity takeoff and estimating app, working for a professional commercial estimator. You run entirely on their PC. Precision matters more than speed: every quantity you produce goes into a bid.
 
-Rules:
-- Do the work with the tools. Keep calling tools until the request is complete; never reply "done" before you have actually made changes or found the answer.
-- Use only sheet and condition names that exist (get_overview lists them) or that you just created. Never invent names to test tools.
-- Never invent quantities. Report numbers only from tool results, with units (LF, SF, SQ, CY, EA).
-- Create a condition before measuring into it. Use clear trade names (e.g. "Fiber cement siding", "Brick veneer", "EIFS", "5/8\\" GWB partition") and a group (CSI division).
-- Sheets need a scale before measuring. If a sheet has none, call set_scale with "detect".
-- ${vision ? 'Call look_at_sheet to see the drawing whenever text alone is not enough. Image pixels convert to page points with the formula it gives you.' : 'You cannot see images; rely on text and geometry tools.'}
+PROJECT: "${store.project.name}" · ${store.project.unit === 'm' ? 'metric' : 'imperial'} · ${sheetList().length} sheets · current sheet ${store.ui.pageKey ? sheetName(store.ui.pageKey) : 'none'}
+CONDITIONS: ${conds.length ? conds.join('; ') : 'none yet'}
+${notes.length ? 'PROJECT NOTES (from earlier work — follow them):\n- ' + notes.join('\n- ') : ''}
 
-Floor plans: measure rooms with fill_rooms using room labels (or ["all"]). Count tags with count_text; count repeated symbols with count_symbols.
+HOW TO WORK
+1. For anything with more than two steps, call plan first, then update it (done: [...]) as you finish steps.
+2. Find information, don't guess it: search_project to locate schedules/legends/notes across sheets; read_schedule for tables; list_views for the views on a sheet; read_sheet_text / find_text for notes; ${vision ? 'look_at_sheet to see the drawing when geometry or text is ambiguous.' : '(you cannot see images; rely on text and geometry tools).'}
+3. Measure with the geometry tools — they are exact: measure_by_tags (finishes with tags), find_regions + measure_regions / measure_similar (closed zones), fill_rooms (rooms by label), count_text (tags), count_symbols (repeated symbols). Use draw_markup only when nothing else works; it is flagged for review.
+4. Never do arithmetic in your head — use calculate. Never invent quantities, tags, sheets or conditions; use only names that exist or that you just created (errors suggest the right name).
+5. Every sheet must have a scale before measuring (set_scale "detect" reads title blocks). Check each view's scale from list_views matches the sheet.
+6. Label every markup with its view or area (e.g. "1 – Front Elevation", "Level 2") so the estimate breaks down.
+7. Save decisions the estimator would want kept with remember (e.g. "BR-1 = Brick veneer, modular, per A-701").
 
-Accuracy first:
-- Prefer the geometry tools (find_regions + measure_regions/measure_similar, fill_rooms, count_text, count_symbols). They measure the real linework exactly. Use draw_markup only when a zone is not closed, and say that it is approximate.
-- Always pass a label (view or area name) so the estimate shows a detailed breakdown.
-- Deduct openings (windows, doors, louvers, storefront) from wall finishes — measure_regions does this automatically.
+EXTERIOR FINISHES (elevations)
+- Find the finish/material schedule (search_project "FINISH SCHEDULE" or "MATERIAL", or the sheet a note references) and read_schedule it.
+- Create one area condition per exterior material, named from the schedule description, group "Exterior finishes", with its tag (e.g. tag "BR-1").
+- For each view from list_views: measure_by_tags. Then resolve its unassigned zones one by one (look at the box; measure_regions into the right condition, or skip glazing/doors/louvers/other trades). Conflicts mean two tags in one zone — look and decide.
+- Openings are deducted automatically. Glazing and storefront are not wall finish.
 
-Exterior elevations and facades (and any sheet of closed shapes):
-1. list_views on the sheet to get each elevation's number, title, scale and box. Check the view scale matches the sheet scale.
-2. Work out the materials: tags on the elevation (e.g. P-1, BR-1, MP-2, EIFS-1, FC-1) and the finish schedule or legend that defines them (find it with read_sheet_text using contains "SCHEDULE" or "LEGEND", on this sheet or the sheet a note points to).
-3. Create one area condition per exterior material, named from the schedule, group "Exterior finishes".
-4. For each view, one at a time: find_regions with that view. Assign each zone a material using the tags inside it, its hatch description, and look_at_sheet of the view box when unsure. Measure with measure_regions (or measure_similar for every zone with the same pattern), label "<number> – <view title>". Glazing/storefront zones are openings, not wall finish.
-5. Keep going until every view on the sheet is done, then review.
+FLOOR PLANS: fill_rooms with room labels ("all" for every numbered room) into the right finish condition (use the room finish schedule if there is one). Count doors/fixtures with count_text on their tags or count_symbols on one example.
 
-When finished, reply with a plain summary: each condition with its total, then the breakdown by view or label (one line each), the openings deducted, and anything you could not measure so the estimator can check it. No tables.`;
+FINISHING UP
+- When done, Gridline asks you to review_markups; fix problems you see.
+- Final reply: one line per condition with total and unit, then the breakdown by view/label, then anything flagged or not measured (so the estimator can check it). Plain sentences and short lists; no tables; no invented numbers.`;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -823,6 +1071,8 @@ async function ask(text) {
   const id = 'chat' + ++state.reqId;
   state.currentId = id;
   state.debug.push({ t: new Date().toISOString(), user: text, model: state.model, caps });
+  state.plan = null;
+  state.planEl = null;
   let finalText = '';
   let actions = 0;
   let changes = 0;
@@ -839,11 +1089,16 @@ async function ask(text) {
           seenImage = true;
         }
       }
+      // Keep recent tool results whole; shorten older ones so the important context fits.
+      const recent = state.history.slice(-60);
+      const toolIdx = recent.map((m, i) => (m.role === 'tool' ? i : -1)).filter((i) => i >= 0);
+      const keepFull = new Set(toolIdx.slice(-8));
+      const compact = recent.map((m, i) => (m.role === 'tool' && !keepFull.has(i) && m.content.length > 900 ? { ...m, content: m.content.slice(0, 900) + ' …(older result shortened)' } : m));
       const res = await api.ai.chat({
         id,
         model: state.model,
         think,
-        messages: [{ role: 'system', content: systemPrompt(vision) }, ...state.history.slice(-60)],
+        messages: [{ role: 'system', content: systemPrompt(vision) }, ...compact],
         tools: toolSchemas(vision),
       });
       if (res.cancelled) {
@@ -905,6 +1160,21 @@ async function ask(text) {
         thinking.querySelector('.txt').textContent = toolLabel(fn.name, args);
         const out = {};
         let result;
+        const def = TOOL_DEFS.find((t) => t.name === fn.name);
+        if (!def) {
+          result = { error: `Unknown tool "${fn.name}". Available: ${TOOL_DEFS.map((t) => t.name).join(', ')}` };
+          addActivity(fn.name, args, result, true);
+          state.history.push({ role: 'tool', tool_name: fn.name, name: fn.name, content: JSON.stringify(result) });
+          continue;
+        }
+        const v = validateArgs(def.parameters, args);
+        if (v.errors.length) {
+          result = { error: 'Invalid arguments: ' + v.errors.join(' '), expected: def.parameters };
+          state.debug.push({ tool: fn.name, args, result: result.error });
+          state.history.push({ role: 'tool', tool_name: fn.name, name: fn.name, content: JSON.stringify(result) });
+          continue;
+        }
+        args = v.args;
         try {
           console.info('[ai] tool start', fn.name);
           const t0 = performance.now();
@@ -934,6 +1204,12 @@ async function ask(text) {
   const grouped = squashHistory(mark);
   if (finalText) {
     const b = addBubble('assistant', finalText);
+    const flagged = store.project.markups.filter((m) => m.review).length;
+    if (flagged && changes) {
+      const f = h(`<button class="btn small ai-flag">${icon('search', 13)} Check ${flagged} flagged markup${flagged === 1 ? '' : 's'}</button>`);
+      f.onclick = () => ctx.reviewNext();
+      b.append(f);
+    }
     if (grouped) {
       const u = h(`<button class="btn small ai-undo">${icon('refresh', 13)} Undo these changes</button>`);
       u.onclick = () => {
@@ -990,6 +1266,13 @@ function toolLabel(name, a) {
       draw_markup: 'Drawing…',
       get_estimate: 'Checking the estimate…',
       list_views: `Finding the views${s}…`,
+      plan: 'Planning…',
+      search_project: `Searching all sheets for "${a && a.text}"…`,
+      read_schedule: `Reading the ${(a && a.title) || 'schedule'}${s}…`,
+      calculate: 'Calculating…',
+      remember: 'Noting that for later…',
+      show: `Showing it${s}…`,
+      measure_by_tags: `Measuring zones by finish tag${a && a.view ? ` in view ${a.view}` : ''}${s}…`,
       find_regions: `Finding zones${a && a.view ? ` in view ${a.view}` : ''}${s}…`,
       measure_regions: `Measuring zones into ${a && a.condition}…`,
       measure_similar: `Measuring matching zones into ${a && a.condition}…`,
@@ -1008,6 +1291,14 @@ function activitySummary(name, a, r) {
     }
     case 'count_text':
       return `Counted ${r.added} × "${a.text}" on ${r.sheet}`;
+    case 'measure_by_tags': {
+      const parts = r.measured.map((e) => `${e.condition} ${fmtNum(e.net_sf, 1)} SF`);
+      return `${r.view || r.sheet}: ${parts.join(' · ') || 'nothing matched'}${r.unassigned_zones.length ? ` · ${r.unassigned_zones.length} zone(s) to decide` : ''}`;
+    }
+    case 'remember':
+      return `Noted: ${a.note}`;
+    case 'calculate':
+      return `${a.expression} = ${fmtNum(r.result, 2)}`;
     case 'measure_regions':
     case 'measure_similar':
       return `Measured ${r.measured} zone${r.measured === 1 ? '' : 's'} into ${r.condition}${r.label ? ` (${r.label})` : ''} — ${fmtNum(r.net_sf, 1)} SF net`;
@@ -1045,6 +1336,7 @@ export async function renderAssistant() {
       <div class="ai-head">
         <span class="ai-title">${icon('sparkle', 16)} Assistant</span>
         <span class="ai-model" id="aiModel"></span>
+        <button class="icon-btn" id="aiNotes" title="Project notes the assistant remembers">${icon('tag', 15)}</button>
         <button class="icon-btn" id="aiLog2" title="Copy log (for troubleshooting)">${icon('copy', 15)}</button>
         <button class="icon-btn" id="aiClear" title="New conversation">${icon('refresh', 15)}</button>
       </div>
@@ -1079,6 +1371,22 @@ export async function renderAssistant() {
       contextMenu(r.left - 120, r.bottom + 4, items);
     };
     $('#aiLog2').onclick = copyLog;
+    $('#aiNotes').onclick = (e) => {
+      const notes = store.project.aiNotes || [];
+      const r = e.currentTarget.getBoundingClientRect();
+      const items = [{ head: notes.length ? 'Project notes (click to remove)' : 'No project notes yet' }];
+      notes.forEach((n, i) =>
+        items.push({
+          label: n.length > 70 ? n.slice(0, 68) + '…' : n,
+          icon: 'x',
+          run: () => {
+            notes.splice(i, 1);
+            ctx.markDirty();
+          },
+        })
+      );
+      contextMenu(r.left - 220, r.bottom + 4, items);
+    };
     $('#aiClear').onclick = () => {
       if (state.busy) return;
       state.history = [];
@@ -1116,6 +1424,7 @@ function renderEmpty() {
   const log = $('#aiLog');
   if (log.children.length) return;
   const ex = [
+    'Take off all exterior finishes on this sheet by elevation, using the finish schedule',
     'Read the scale on every sheet from the title blocks',
     'Fill every room on this sheet as Carpet tile',
     'Count all the door tags on this sheet',
@@ -1163,7 +1472,24 @@ function addBubble(kind, text) {
   return b;
 }
 
+function renderPlan() {
+  const log = $('#aiLog');
+  if (!log || !state.plan) return;
+  const { steps, done } = state.plan;
+  const html = `<div class="ai-plan-h">${icon('layers', 13)} Plan · ${done.size}/${steps.length}</div>${steps
+    .map((t, i) => `<div class="ai-step ${done.has(i) ? 'done' : ''}"><span class="box">${done.has(i) ? '✓' : ''}</span><span>${esc(t)}</span></div>`)
+    .join('')}`;
+  if (state.planEl && state.planEl.isConnected) state.planEl.innerHTML = html;
+  else {
+    state.planEl = h(`<div class="ai-plan">${html}</div>`);
+    const pending = log.querySelector('.ai-msg.pending');
+    pending ? log.insertBefore(state.planEl, pending) : log.append(state.planEl);
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
 function addActivity(name, args, result, isErr = false) {
+  if (name === 'plan' && !isErr && !(result && result.error)) return; // shown as the checklist
   let s = activitySummary(name, args, result);
   let quiet = false;
   if (!s) {

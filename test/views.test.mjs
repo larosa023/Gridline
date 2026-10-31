@@ -29,3 +29,16 @@ test('side-by-side views split the row', () => {
   assert.ok(v[0].box[0] + v[0].box[2] <= 720);
   assert.ok(v[1].box[0] >= 600);
 });
+
+test('a schedule beside a view does not clip it', () => {
+  const items = [
+    T('1', 40, 700), T('FRONT ELEVATION', 60, 700),
+    T('EXTERIOR FINISH SCHEDULE', 1100, 1076), T('BR-1', 1100, 1100, 6),
+    T('2', 40, 1300), T('REAR ELEVATION', 60, 1300),
+  ];
+  const v = detectViews(items, 1800, 1500, 1400);
+  const rear = v.find((x) => x.title === 'REAR ELEVATION');
+  const sch = v.find((x) => x.kind === 'table');
+  assert.ok(sch);
+  assert.ok(rear.box[1] < 730, `rear top ${rear.box[1]} should start under the front view's title`);
+});

@@ -15,6 +15,10 @@
 
 - **Plans** — drop in PDF drawing sets (multi-page). Sheets are auto-named from the title block (e.g. `A-101`) and shown with thumbnails. The sheet list switches between **All** pages and **Current** page only (each PDF also collapses with its arrow), and **×** closes a PDF. *File → Close Project* (`Ctrl+W`) closes everything.
 - **Collapsible side panels** — slim tabs on the left and right edges of the drawing tuck each sidebar away and bring it back with one click (`[` left, `]` right, `\` both). The drawing stays put while they slide, and the layout is remembered.
+- **Appearance** — themes (Dark, Midnight, Slate, Light, Paper, High contrast), accent colours, and **dark drawings**: show sheets as Dark (charcoal paper, light linework — coloured lines keep their hue), Blueprint, or Low glare. A faint-line boost keeps light hatching and small text readable. Measurements, markups and the assistant always use the real drawing. `Ctrl+Shift+D` toggles dark drawings.
+- **Command palette** (`Ctrl+K`) — type to run any action, jump to a sheet or condition, switch themes, or open a recent project.
+- **Autosave & recovery** — unsaved work is saved in the background every 90 seconds; if Gridline closes unexpectedly it offers to recover it next time.
+- **Recent projects** on the start screen, **sheet search** in the Sheets panel, and a **condition library** that saves conditions (with tags, costs and waste) for reuse across projects.
 - **Settings** (gear icon, `Ctrl+,`) — theme (dark / light / match Windows), snap on/off and strength, sheet list mode, automatic updates, and per-project units, length display (ft-in or decimal), on-plan labels and estimate markups. Project settings can be saved as defaults for new projects.
 - **Scale** — architectural, engineering and metric presets, or **calibrate** from any known dimension. Apply one scale to a whole set.
 - **Quick LF / SF toggles** — one click on **LF** or **SF** (or `Tab` to flip between them) and you're measuring; no condition setup required. Each toggle remembers the last condition you used with it, and its ▾ menu switches conditions.
@@ -25,6 +29,9 @@
 - **AI assistant (free, runs on your PC)** — click **Ask** (or press `/`) and tell it what to do: *"read the scale on every sheet"*, *"fill every room on A-101 as Carpet tile"*, *"count all the door tags"*, *"make a 6/12 roof condition at $145 a square"*, *"what are my totals?"*. It uses Gridline's own tools (auto-scale, Fill, counts, conditions, pricing) and can look at the sheet. Everything it does in one request is a single **Undo**.
   - Needs [Ollama](https://ollama.com/download) running on the same PC (no account needed). On first use the panel offers a one-click download of the recommended model (Qwen 3.8 27B, ~18 GB — a 24 GB GPU like an RTX 4090 runs it well). Any installed Ollama model with tool support can be picked from the panel.
   - **Measures from the real linework, not by eye.** It finds each view on a sheet (e.g. "1 – Proposed Front Elevation"), finds every closed zone in it, ignoring hatching, reads the finish tags inside each zone, and measures exact areas with openings (windows, doors, storefront) deducted automatically.
+  - **Plans its work** as a visible checklist, **searches every sheet** for schedules and notes, **reads schedules as tables**, and does all math with an exact calculator — no mental arithmetic.
+  - **Measures by finish tag** — conditions carry tags (BR-1, FC-1…); each zone is measured into the condition whose tag is inside it. Untagged zones are matched by hatch pattern (also against other elevations) and **flagged with a ?** for you to confirm; windows, doors and storefront are recognised as openings. **Check flagged** jumps through anything it wasn't sure about.
+  - **Remembers project decisions** (e.g. "BR-1 = brick veneer per A-701") and checks tool inputs, suggesting the right sheet or condition name when one is mistyped.
   - **Detailed and self-checking.** Every markup is labeled by view or area, the estimate can show a **breakdown by sheet & view**, and the CSV export includes a takeoff-detail section. Before it reports back, the assistant reviews an image of its markups on the drawing and fixes anything off.
   - Drawings never leave your computer.
 - **Snap to plan lines** — Gridline reads the vector linework in the PDF and snaps to wall corners (□), line crossings (×) and anywhere along a line (◇), plus your existing markup points. `S` toggles it; hold `Ctrl` to place a free point.
@@ -59,6 +66,7 @@ Download **[Gridline-Setup.exe](https://github.com/larosa023/Gridline/releases/l
 | Count | `C` | Prev / next sheet | `PgUp` / `PgDn` |
 | Snap on/off | `S` | Free point (no snap) | hold `Ctrl` |
 | Fill room | `B` | Find matches | Count tool, drag a box |
+| Command palette | `Ctrl+K` | Dark drawings | `Ctrl+Shift+D` |
 | Measure | `M` | Undo / redo | `Ctrl+Z` / `Ctrl+Y` |
 | Calibrate | `K` | Takeoff / Estimate | `Ctrl+1` / `Ctrl+2` |
 

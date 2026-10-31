@@ -239,6 +239,19 @@ export function zoomAt(factor, cx, cy) {
   apply();
 }
 
+/** Zoom and centre on a box [x, y, w, h] in page points. */
+export function fitRect(box, pad = 0.25) {
+  if (!view.pageW || !box) return;
+  const r = viewportEl.getBoundingClientRect();
+  const [x, y, w, h] = box;
+  const bw = Math.max(w, 20) * (1 + pad * 2),
+    bh = Math.max(h, 20) * (1 + pad * 2);
+  view.zoom = clampZoom(Math.min(r.width / bw, r.height / bh));
+  view.x = r.width / 2 - (x + w / 2) * view.zoom;
+  view.y = r.height / 2 - (y + h / 2) * view.zoom;
+  apply(true);
+}
+
 export function zoomCenter(factor) {
   const r = viewportEl.getBoundingClientRect();
   zoomAt(factor, r.width / 2, r.height / 2);

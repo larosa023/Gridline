@@ -1,3 +1,4 @@
+import { THEMES, ACCENTS, DRAWING_MODES, appearance, set as setAppearance } from './appearance.js';
 import { modal, h, esc, $ } from './dom.js';
 import { icon } from './icons.js';
 import { COLORS, store, nextColor } from './store.js';
@@ -39,6 +40,7 @@ export function conditionDialog(initial = {}) {
           </div>
           <div class="fields">
             <label class="field full"><span>Name</span><input name="name" required value="${esc(initial.name || '')}" placeholder="e.g. Interior partition – 3-5/8&quot; mtl stud" /></label>
+            <label class="field"><span>Finish tag <small class="muted">(optional)</small></span><input name="tag" value="${esc(initial.tag || '')}" placeholder="e.g. BR-1, P-2" /></label>
             <label class="field"><span>Group / division</span><input name="group" list="groupList" value="${esc(initial.group || '')}" placeholder="e.g. 09 – Finishes" />
               <datalist id="groupList">${groups.map((g) => `<option value="${esc(g)}">`).join('')}</datalist></label>
             <label class="field" data-only="linear area"><span>Height <small class="muted">(${metric ? 'm' : 'ft-in'}, optional)</small></span><input name="height" value="${initial.height ? (metric ? initial.height : formatFeetInches(initial.height)) : ''}" placeholder="${metric ? '3.0' : "10'-0\""}" /></label>
@@ -127,6 +129,7 @@ export function conditionDialog(initial = {}) {
         roofLine,
         color,
         group: String(f.get('group') || '').trim(),
+        tag: String(f.get('tag') || '').trim().toUpperCase(),
         height: type === 'count' ? 0 : height,
         depth: type === 'area' ? +f.get('depth') || 0 : 0,
         waste: f.get('waste') === '' ? (type === 'roof' && isNew ? 10 : 0) : +f.get('waste') || 0,
@@ -210,6 +213,8 @@ export function shortcutsDialog() {
     ['Auto-fill a room', 'B'],
     ['Flip Linear ⇄ Area', 'Tab'],
     ['Snap to plan lines on/off', 'S'],
+    ['Dark drawings on/off', 'Ctrl+Shift+D'],
+    ['Command palette', 'Ctrl+K'],
     ['Hide / show left panel', '['],
     ['Hide / show right panel', ']'],
     ['Hide / show both panels', '\\'],
@@ -280,7 +285,9 @@ export function settingsDialog({ app, proj, version, hasProject, onCheckUpdates 
       const n = h(`<div class="settings">
         <div class="settings-group">
           <h3>App</h3>
-          <label class="setting-row"><span><b>Theme</b></span><select name="theme">${opt('dark', app.theme, 'Dark')}${opt('light', app.theme, 'Light')}${opt('system', app.theme, 'Match Windows')}</select></label>
+          <label class="setting-row"><span><b>Theme</b></span><select name="theme">${THEMES.map((t) => opt(t.id, app.theme, t.name)).join('')}${opt('system', app.theme, 'Match Windows')}</select></label>
+          <label class="setting-row"><span><b>Accent colour</b></span><select name="accent">${ACCENTS.map((x) => opt(x.id, app.accent, x.name)).join('')}</select></label>
+          <label class="setting-row"><span><b>Drawing display</b><small>Dark and Blueprint invert the sheet for night work; text and linework stay readable</small></span><select name="drawing">${DRAWING_MODES.map((m) => opt(m.id, app.drawing, m.name)).join('')}</select></label>
           ${toggle('snap', app.snap, 'Snap to plan lines', 'Pull points onto wall corners and lines in the PDF. Hold Ctrl to place a free point.')}
           <label class="setting-row"><span><b>Snap strength</b><small>How close the cursor has to be before it grabs a line</small></span><select name="snapRadius">${opt('6', String(app.snapRadius), 'Light')}${opt('10', String(app.snapRadius), 'Normal')}${opt('16', String(app.snapRadius), 'Strong')}</select></label>
           <label class="setting-row"><span><b>Fill gap tolerance</b><small>Bigger bridges small breaks in walls; too big can merge rooms</small></span><select name="fillGap">${opt('small', app.fillGap, 'Small')}${opt('medium', app.fillGap, 'Medium')}${opt('large', app.fillGap, 'Large')}</select></label>
@@ -312,6 +319,8 @@ export function settingsDialog({ app, proj, version, hasProject, onCheckUpdates 
       return {
         app: {
           theme: f.get('theme'),
+          accent: f.get('accent'),
+          drawing: f.get('drawing'),
           snap: on('snap'),
           snapRadius: +f.get('snapRadius'),
           sheetMode: f.get('sheetMode'),
@@ -329,6 +338,144 @@ export function settingsDialog({ app, proj, version, hasProject, onCheckUpdates 
         },
         makeDefault: on('makeDefault'),
       };
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------------------
+// Appearance popover: theme, accent colour, drawing display
+// ---------------------------------------------------------------------------------------
+
+const DRAW_PREVIEW = {
+  normal: { bg: '#ffffff', ink: '#1a1a1a', red: '#d33', f: '' },
+  dark: { bg: '#1b1f25', ink: '#eef1f4', red: '#ff7b7b', f: '' },
+  blueprint: { bg: '#0e2a4f', ink: '#e9f3ff', red: '#e9f3ff', f: '' },
+  dim: { bg: '#d9d3c6', ink: '#1a1814', red: '#b33', f: '' },
+};
+
+function drawPreview(id) {
+  const c = DRAW_PREVIEW[id];
+  return `<svg viewBox="0 0 80 40" preserveAspectRatio="none"><rect width="80" height="40" fill="${c.bg}"/>
+    <rect x="8" y="7" width="40" height="24" fill="none" stroke="${c.ink}" stroke-width="1.4"/>
+    <path d="M28 7v24M8 19h20" stroke="${c.ink}" stroke-width="0.8"/>
+    ${[0, 1, 2, 3, 4].map((i) => `<path d="M30 ${11 + i * 4}h16" stroke="${c.ink}" stroke-opacity="0.45" stroke-width="0.5"/>`).join('')}
+    <rect x="54" y="25" width="20" height="9" fill="none" stroke="${c.ink}" stroke-width="0.8"/>
+    <text x="57" y="31.5" font-size="5" font-family="sans-serif" font-weight="700" fill="${c.ink}">A-101</text>
+    <circle cx="66" cy="12" r="4" fill="none" stroke="${c.red}" stroke-width="1"/></svg>`;
+}
+
+export function appearancePopover(anchor) {
+  const old = document.getElementById('appearPop');
+  if (old) return old.remove();
+  const pop = document.createElement('div');
+  pop.className = 'appear-pop';
+  pop.id = 'appearPop';
+  const render = () => {
+    const a = appearance();
+    pop.innerHTML = `
+      <h4>Theme</h4>
+      <div class="theme-grid">${THEMES.map(
+        (t) => `<button class="theme-card ${!a.system && a.theme === t.id ? 'sel' : ''}" data-theme-id="${t.id}">
+          <div class="sw" style="background:${t.swatch[1]}"><i style="background:${t.id === 'contrast' ? '#fff' : 'var(--accent)'}"></i><b style="background:${t.base === 'dark' ? '#fff' : '#000'}"></b></div>${esc(t.name)}</button>`
+      ).join('')}</div>
+      <h4>Accent</h4>
+      <div class="accent-row">${ACCENTS.map((x) => `<button class="accent-dot ${a.accent === x.id ? 'sel' : ''}" data-accent="${x.id}" title="${esc(x.name)}" style="background:${x.c}"></button>`).join('')}</div>
+      <h4>Drawings</h4>
+      <div class="draw-grid">${DRAWING_MODES.map((m) => `<button class="draw-card ${a.drawing === m.id ? 'sel' : ''}" data-drawing="${m.id}" title="${esc(m.hint)}"><div class="pv">${drawPreview(m.id)}</div>${esc(m.name)}</button>`).join('')}</div>
+      <div class="appear-row" ${a.drawing === 'dark' || a.drawing === 'blueprint' ? '' : 'hidden'}><span>Faint line boost</span><input type="range" min="0" max="1" step="0.05" value="${a.boost}" data-boost /></div>
+      <div class="appear-foot"><label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="checkbox" data-system ${a.system ? 'checked' : ''}/> Match Windows</label><span title="Toggle dark drawings"><kbd>Ctrl+Shift+D</kbd></span></div>`;
+    pop.querySelectorAll('[data-theme-id]').forEach((b) => (b.onclick = () => (setAppearance({ theme: b.dataset.themeId, system: false }), render())));
+    pop.querySelectorAll('[data-accent]').forEach((b) => (b.onclick = () => (setAppearance({ accent: b.dataset.accent }), render())));
+    pop.querySelectorAll('[data-drawing]').forEach((b) => (b.onclick = () => (setAppearance({ drawing: b.dataset.drawing }), render())));
+    const boost = pop.querySelector('[data-boost]');
+    if (boost) boost.oninput = () => setAppearance({ boost: +boost.value });
+    pop.querySelector('[data-system]').onchange = (e) => (setAppearance({ system: e.target.checked }), render());
+  };
+  render();
+  document.body.append(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.top = r.bottom + 8 + 'px';
+  pop.style.left = Math.max(8, Math.min(innerWidth - pop.offsetWidth - 8, r.right - pop.offsetWidth)) + 'px';
+  const close = (e) => {
+    if (e.type === 'keydown' ? e.key === 'Escape' : !pop.contains(e.target) && !anchor.contains(e.target)) {
+      pop.remove();
+      document.removeEventListener('mousedown', close, true);
+      document.removeEventListener('keydown', close, true);
+    }
+  };
+  setTimeout(() => {
+    document.addEventListener('mousedown', close, true);
+    document.addEventListener('keydown', close, true);
+  });
+}
+
+// ---------------------------------------------------------------------------------------
+// Condition library: reusable conditions across projects
+// ---------------------------------------------------------------------------------------
+export function libraryDialog(lib, projectConds) {
+  const have = new Set(projectConds.map((c) => `${c.type}|${c.name.toLowerCase()}`));
+  let items = lib.slice();
+  return modal({
+    title: 'Condition library',
+    wide: true,
+    buttons: [
+      { label: 'Close', value: null },
+      { label: 'Add selected to project', primary: true },
+    ],
+    build(body) {
+      const render = (q = '') => {
+        const ql = q.toLowerCase();
+        const groups = new Map();
+        items.forEach((c, i) => {
+          if (ql && !`${c.name} ${c.group || ''} ${c.type}`.toLowerCase().includes(ql)) return;
+          const g = c.group || 'Ungrouped';
+          if (!groups.has(g)) groups.set(g, []);
+          groups.get(g).push([c, i]);
+        });
+        const listEl = body.querySelector('.lib-list');
+        listEl.innerHTML = items.length
+          ? [...groups]
+              .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+              .map(
+                ([g, arr]) =>
+                  `<div class="cond-group">${esc(g)}</div>` +
+                  arr
+                    .map(([c, i]) => {
+                      const inProj = have.has(`${c.type}|${c.name.toLowerCase()}`);
+                      const cost = (+c.matCost || 0) + (+c.laborCost || 0);
+                      return `<label class="lib-row ${inProj ? 'in' : ''}"><input type="checkbox" data-i="${i}" ${inProj ? 'disabled' : ''}/>
+                        <span class="dot" style="background:${esc(c.color || '#888')}"></span>
+                        <span class="lib-name">${esc(c.name)}</span>
+                        <span class="chip">${esc(TYPE_INFO[c.type] ? TYPE_INFO[c.type].label : c.type)}</span>
+                        <span class="muted small">${cost ? '$' + cost.toFixed(2) + '/unit' : ''}${inProj ? ' · in project' : ''}</span>
+                        <button type="button" class="icon-btn" data-del="${i}" title="Remove from library">${icon('trash', 14)}</button></label>`;
+                    })
+                    .join('')
+              )
+              .join('')
+          : `<div class="empty-list">Your library is empty.<br/>Right-click a condition → <b>Save to library</b>, or use <b>Save all</b> in the Conditions panel menu.</div>`;
+        listEl.querySelectorAll('[data-del]').forEach(
+          (b) =>
+            (b.onclick = (e) => {
+              e.preventDefault();
+              items.splice(+b.dataset.del, 1);
+              body.dataset.changed = '1';
+              render(body.querySelector('[data-q]').value);
+            })
+        );
+      };
+      body.append(
+        h(`<div><div class="search" style="margin-bottom:10px">${icon('search', 15)}<input data-q placeholder="Search library" /></div><div class="lib-list"></div>
+           <p class="muted small" style="margin-top:10px">The library is saved on this PC and shared by all your projects.</p></div>`)
+      );
+      body.querySelector('[data-q]').addEventListener('input', (e) => render(e.target.value));
+      body.querySelector('[data-q]').addEventListener('keydown', (e) => e.stopPropagation());
+      render();
+      body._items = () => items;
+    },
+    onSubmit(form) {
+      const picked = [...form.querySelectorAll('[data-i]:checked')].map((x) => items[+x.dataset.i]);
+      return { add: picked, library: items, changed: form.querySelector('.body').dataset.changed === '1' };
     },
   });
 }

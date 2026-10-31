@@ -11,6 +11,21 @@ contextBridge.exposeInMainWorld('gridline', {
   confirmClose: () => ipcRenderer.send('app:confirm-close'),
   onCloseRequested: (fn) => ipcRenderer.on('app:close-requested', () => fn()),
   onMenu: (fn) => ipcRenderer.on('menu', (_e, name, arg) => fn(name, arg)),
+  autosave: {
+    write: (d) => ipcRenderer.invoke('autosave:write', d),
+    list: () => ipcRenderer.invoke('autosave:list'),
+    read: (id) => ipcRenderer.invoke('autosave:read', id),
+    clear: (id) => ipcRenderer.invoke('autosave:clear', id),
+  },
+  recent: {
+    list: () => ipcRenderer.invoke('recent:list'),
+    add: (e) => ipcRenderer.invoke('recent:add', e),
+    remove: (p) => ipcRenderer.invoke('recent:remove', p),
+  },
+  library: {
+    get: () => ipcRenderer.invoke('library:get'),
+    set: (list) => ipcRenderer.invoke('library:set', list),
+  },
   ai: {
     setBase: (u) => ipcRenderer.invoke('ai:set-base', u),
     status: () => ipcRenderer.invoke('ai:status'),

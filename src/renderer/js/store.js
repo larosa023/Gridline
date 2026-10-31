@@ -22,6 +22,7 @@ export function blankProject() {
   return {
     app: 'gridline',
     format: 1,
+    id: uid('proj'),
     name: 'Untitled project',
     unit: d.unit === 'm' ? 'm' : 'ft',
     settings,

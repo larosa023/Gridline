@@ -33,33 +33,40 @@ export function detectViews(items, pageW, pageH, frameRight = pageW * 0.8) {
     return { number: num ? num.str : null, title: t.str, scale, titleAt: [Math.round(t.x), Math.round(t.y)], t };
   });
 
-  // Rows of views: titles at about the same height.
+  // Boxes: a view's title sits under the drawing. Each view extends up to the nearest title
+  // above it that overlaps it horizontally, and sideways to its neighbours on the same row.
+  // Schedules, legends and notes are listed but never clip a drawing.
+  const isTable = (v) => /SCHEDULE|LEGEND|NOTES|ABBREVIATIONS/i.test(v.title);
   views.sort((a, b) => a.t.y - b.t.y || a.t.x - b.t.x);
-  const rows = [];
-  for (const v of views) {
-    const row = rows.find((r) => Math.abs(r.y - v.t.y) < v.t.h * 2);
-    if (row) row.items.push(v);
-    else rows.push({ y: v.t.y, items: [v] });
-  }
-  rows.sort((a, b) => a.y - b.y);
+  const drawings = views.filter((v) => !isTable(v));
+  const sameRow = (a, b) => Math.abs(a.t.y - b.t.y) < Math.max(a.t.h, b.t.h) * 2;
+  const xr = (v) => {
+    const row = drawings.filter((o) => sameRow(o, v)).sort((a, b) => a.t.x - b.t.x);
+    const i = row.indexOf(v);
+    const left = Math.max(0, v.t.x - v.t.h * 6);
+    const next = row[i + 1];
+    const right = next ? Math.max(left + 20, next.t.x - next.t.h * 6) : frameRight;
+    return [left, right];
+  };
   const out = [];
-  rows.forEach((row, ri) => {
-    const top = ri ? rows[ri - 1].y + rows[ri - 1].items[0].t.h * 2.5 : 0;
-    const bottom = row.y + row.items[0].t.h * 2.5;
-    row.items.sort((a, b) => a.t.x - b.t.x);
-    row.items.forEach((v, i) => {
-      const left = Math.max(0, v.t.x - v.t.h * 6);
-      const next = row.items[i + 1];
-      const right = next ? Math.max(left + 20, next.t.x - next.t.h * 6) : frameRight;
-      out.push({
-        number: v.number,
-        title: v.title,
-        scale: v.scale,
-        box: [Math.round(left), Math.round(top), Math.round(right - left), Math.round(bottom - top)],
-        titleAt: v.titleAt,
-      });
+  for (const v of views) {
+    const [left, right] = isTable(v) ? [Math.max(0, v.t.x - v.t.h), Math.min(frameRight, v.t.x + Math.max(v.t.w * 1.6, v.t.h * 40))] : xr(v);
+    const above = drawings.filter((o) => o !== v && o.t.y < v.t.y - v.t.h * 2).filter((o) => {
+      const [l2, r2] = xr(o);
+      return l2 < right && r2 > left;
     });
-  });
+    const bottom = v.t.y + v.t.h * 2.5;
+    let top = above.length ? Math.max(...above.map((o) => o.t.y + o.t.h * 2.5)) : 0;
+    if (isTable(v)) top = v.t.y - v.t.h * 1.5; // tables read downward from their title
+    out.push({
+      number: v.number,
+      title: v.title,
+      scale: v.scale,
+      kind: isTable(v) ? 'table' : 'drawing',
+      box: isTable(v) ? [Math.round(left), Math.round(top), Math.round(right - left), Math.round(Math.min(pageH, v.t.y + v.t.h * 40) - top)] : [Math.round(left), Math.round(top), Math.round(right - left), Math.round(bottom - top)],
+      titleAt: v.titleAt,
+    });
+  }
   return out;
 }
 

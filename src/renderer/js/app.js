@@ -9,7 +9,9 @@ import { fillAt, clearFillCache } from './fill.js';
 import { markupPitch } from './geometry.js';
 import { initPanels, renderSheets, renderConditions, renderInspector, setSheetMode } from './panels.js';
 import { initEstimate, renderEstimate, estimateCsv } from './estimate.js';
-import { conditionDialog, calibrateDialog, scaleOptionsHtml, presetToScale, shortcutsDialog, aboutDialog, settingsDialog, TYPE_INFO } from './dialogs.js';
+import { conditionDialog, calibrateDialog, scaleOptionsHtml, presetToScale, shortcutsDialog, aboutDialog, settingsDialog, appearancePopover, libraryDialog, TYPE_INFO } from './dialogs.js';
+import { openPalette } from './palette.js';
+import { initAppearance, onAppearance, appearance, set as setAppearance, cycleBase, toggleDarkDrawings, THEMES, DRAWING_MODES } from './appearance.js';
 import { SCALE_PRESETS, pickSheetScale } from './units.js';
 import { $, $$, h, esc, toast, modal, contextMenu, closeContextMenu } from './dom.js';
 import { hydrateIcons, icon } from './icons.js';
@@ -62,8 +64,6 @@ const setPref = (k, v) => {
     localStorage.setItem(k, v);
   } catch {}
 };
-let themePref = 'dark';
-const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
 let snapOn = pref('gridline-snap', 'on') !== 'off';
 let snapRadius = +pref('gridline-snap-radius', '10') || 10;
 let autoUpdate = pref('gridline-auto-update', 'on') !== 'off';
@@ -85,6 +85,8 @@ const panelActions = {
   removeDocument,
   copyScaleToAll,
   detectScales,
+  saveToLibrary: (ids) => saveToLibrary(ids),
+  reviewNext: (afterClear) => reviewNext(afterClear),
   activateCondition,
   editCondition,
   duplicateCondition,
@@ -96,7 +98,11 @@ const panelActions = {
 initPanels(panelActions);
 initEstimate({ setUnit, exportCsv });
 
-applyTheme(pref('gridline-theme', 'dark'));
+initAppearance();
+onAppearance(() => {
+  $('#btnTheme').innerHTML = icon(document.documentElement.dataset.base === 'dark' ? 'sun' : 'moon');
+});
+$('#btnTheme').innerHTML = icon(document.documentElement.dataset.base === 'dark' ? 'sun' : 'moon');
 if (api.updater.setAuto) api.updater.setAuto(autoUpdate);
 api.version().then((v) => {
   store.version = v;
@@ -184,15 +190,7 @@ function toolHint() {
 }
 
 // ---------- Theme ----------
-function applyTheme(t) {
-  themePref = t;
-  setPref('gridline-theme', t);
-  const actual = t === 'system' ? (systemDark.matches ? 'dark' : 'light') : t;
-  document.documentElement.dataset.theme = actual;
-  $('#btnTheme').innerHTML = icon(actual === 'dark' ? 'sun' : 'moon');
-}
-systemDark.addEventListener('change', () => themePref === 'system' && applyTheme('system'));
-const toggleTheme = () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+const toggleTheme = () => cycleBase();
 
 // ---------- Files ----------
 function toBase64(bytes) {
@@ -309,6 +307,7 @@ async function confirmDiscard(action = 'continue') {
   });
   if (r === 2) return false;
   if (r === 0) return await saveProject();
+  if (api.autosave) await api.autosave.clear(store.project.id); // chose not to keep it
   return true;
 }
 
@@ -342,7 +341,7 @@ function closeCurrentDrawing() {
 async function openSettings() {
   const s = store.project.settings;
   const r = await settingsDialog({
-    app: { theme: themePref, snap: snapOn, snapRadius, sheetMode: store.ui.sheetMode, autoUpdate, fillGap, autoScale },
+    app: { theme: appearance().system ? 'system' : appearance().theme, accent: appearance().accent, drawing: appearance().drawing, snap: snapOn, snapRadius, sheetMode: store.ui.sheetMode, autoUpdate, fillGap, autoScale },
     proj: { unit: store.project.unit, labelStyle: s.labelStyle, showLabels: s.showLabels, taxPct: s.taxPct, overheadPct: s.overheadPct, profitPct: s.profitPct },
     version: store.version,
     hasProject: true,
@@ -352,7 +351,7 @@ async function openSettings() {
     },
   });
   if (!r) return;
-  applyTheme(r.app.theme);
+  setAppearance(r.app.theme === 'system' ? { system: true, accent: r.app.accent, drawing: r.app.drawing } : { theme: r.app.theme, system: false, accent: r.app.accent, drawing: r.app.drawing });
   snapOn = r.app.snap;
   setPref('gridline-snap', snapOn ? 'on' : 'off');
   snapRadius = r.app.snapRadius;
@@ -384,16 +383,24 @@ async function openProject(path) {
   try {
     res = await api.openProject(path);
   } catch (e) {
+    if (path && api.recent) api.recent.remove(path);
     return toast("Couldn't open that file.", { kind: 'err' });
   }
   if (!res) return;
+  await loadProjectText(res.text, res.path);
+}
+
+/** Load a project from its saved text. `recovered` marks it as unsaved work from autosave. */
+async function loadProjectText(text, filePath, { recovered = false } = {}) {
   let data;
   try {
-    data = JSON.parse(res.text);
+    data = JSON.parse(text);
     if (data.app !== 'gridline') throw new Error('not a gridline file');
   } catch {
     return toast("That file isn't a Gridline project.", { kind: 'err' });
   }
+  if (!data.id) data.id = uid('proj');
+  const res = { path: filePath };
   viewer.unloadAll();
   viewer.clearCanvas();
   store.project = Object.assign(blankProject(), data);
@@ -412,26 +419,30 @@ async function openProject(path) {
     }
   }
   resetHistory();
-  markDirty(false);
+  markDirty(recovered);
   const first = orderedPageKeys()[0];
   if (first) await goToPage(first);
   emit('all');
-  toast(`Opened ${store.project.name}`, { kind: 'ok', timeout: 2500 });
+  toast(recovered ? `Recovered ${store.project.name}. Save it to keep it.` : `Opened ${store.project.name}`, { kind: 'ok', timeout: recovered ? 6000 : 2500 });
+}
+
+async function projectText() {
+  const documents = [];
+  for (const d of store.project.documents) {
+    if (d.data) documents.push(d); // a drawing that failed to load keeps its original data
+    else {
+      const bytes = await viewer.documentBytes(d.id);
+      if (!bytes) throw new Error(`Drawing "${d.name}" isn't loaded`);
+      documents.push({ ...d, data: toBase64(bytes) });
+    }
+  }
+  return JSON.stringify({ ...store.project, documents });
 }
 
 async function saveProject(saveAs = false) {
   let text;
   try {
-    const documents = [];
-    for (const d of store.project.documents) {
-      if (d.data) documents.push(d); // a drawing that failed to load keeps its original data
-      else {
-        const bytes = await viewer.documentBytes(d.id);
-        if (!bytes) throw new Error(`Drawing "${d.name}" isn't loaded`);
-        documents.push({ ...d, data: toBase64(bytes) });
-      }
-    }
-    text = JSON.stringify({ ...store.project, documents });
+    text = await projectText();
   } catch (e) {
     toast('Save failed: ' + (e.message || e), { kind: 'err' });
     return false;
@@ -441,6 +452,7 @@ async function saveProject(saveAs = false) {
     if (p === null && !api.__shim) return false;
     store.filePath = p || store.filePath;
     markDirty(false);
+    if (api.autosave) api.autosave.clear(store.project.id);
     toast('Saved', { kind: 'ok', timeout: 1600 });
     return true;
   } catch (e) {
@@ -1185,7 +1197,7 @@ document.addEventListener('keydown', (e) => {
   const k = e.key;
   if (e.ctrlKey || e.metaKey) {
     if (!api.__shim) return; // Electron menu accelerators handle these.
-    const map = { s: () => saveProject(e.shiftKey), o: () => openProject(), z: () => menuCmd('undo'), y: () => menuCmd('redo'), e: () => exportCsv(), w: () => closeProject(), ',': () => openSettings() };
+    const map = { s: () => saveProject(e.shiftKey), o: () => openProject(), z: () => menuCmd('undo'), y: () => menuCmd('redo'), e: () => exportCsv(), w: () => closeProject(), ',': () => openSettings(), k: () => showPalette(), d: () => e.shiftKey && toggleDarkDrawings() };
     if (map[k.toLowerCase()]) {
       e.preventDefault();
       map[k.toLowerCase()]();
@@ -1288,7 +1300,7 @@ $('#emptyAdd').onclick = addPdfs;
 $('#btnOpen').onclick = () => openProject();
 $('#emptyOpen').onclick = () => openProject();
 $('#btnSave').onclick = () => saveProject();
-$('#btnTheme').onclick = toggleTheme;
+$('#btnTheme').onclick = (e) => appearancePopover(e.currentTarget);
 $('#btnSettings').onclick = openSettings;
 
 // ---------- Right panel: Properties / Assistant ----------
@@ -1317,6 +1329,8 @@ initAssistant(api, {
   autoFill,
   findMatches,
   refresh: () => refresh('all'),
+  markDirty: () => markDirty(),
+  reviewNext: () => reviewNext(),
 });
 
 // ---------- Collapsible side panels ----------
@@ -1349,6 +1363,138 @@ $('#toggleLeft').addEventListener('pointerdown', (e) => e.stopPropagation());
 $('#toggleRight').addEventListener('pointerdown', (e) => e.stopPropagation());
 applyPanels();
 $('#btnNewCond').onclick = () => newCondition();
+$('#btnLibrary').onclick = () => openLibrary();
+
+// ---------- Condition library ----------
+const LIB_FIELDS = ['name', 'type', 'tag', 'group', 'height', 'depth', 'pitch', 'roofLine', 'waste', 'matCost', 'laborCost', 'color', 'costBasis', 'notes'];
+async function getLibrary() {
+  if (api.library) return (await api.library.get()) || [];
+  try {
+    return JSON.parse(localStorage.getItem('gridline-library') || '[]');
+  } catch {
+    return [];
+  }
+}
+async function setLibrary(list) {
+  if (api.library) return api.library.set(list);
+  try {
+    localStorage.setItem('gridline-library', JSON.stringify(list));
+  } catch {}
+}
+async function saveToLibrary(ids) {
+  const lib = await getLibrary();
+  let n = 0;
+  for (const id of ids) {
+    const c = condition(id);
+    if (!c) continue;
+    const entry = Object.fromEntries(LIB_FIELDS.map((k) => [k, c[k]]));
+    entry.savedAt = new Date().toISOString();
+    const i = lib.findIndex((x) => x.type === c.type && x.name.toLowerCase() === c.name.toLowerCase());
+    if (i >= 0) lib[i] = entry;
+    else lib.push(entry);
+    n++;
+  }
+  await setLibrary(lib);
+  toast(n === 1 ? `Saved "${condition(ids[0]).name}" to your library` : `Saved ${n} conditions to your library`, { kind: 'ok', timeout: 2200 });
+}
+async function openLibrary() {
+  const lib = await getLibrary();
+  const r = await libraryDialog(lib, store.project.conditions);
+  if (!r) return;
+  if (r.changed) await setLibrary(r.library);
+  if (r.add && r.add.length) {
+    const used = new Set(store.project.conditions.map((c) => c.color));
+    commit((p) => {
+      for (const e of r.add) {
+        const c = { id: uid('cond'), ...Object.fromEntries(LIB_FIELDS.map((k) => [k, e[k]])) };
+        if (!c.color || used.has(c.color)) c.color = nextColor();
+        used.add(c.color);
+        p.conditions.push(c);
+      }
+    }, 'conditions');
+    toast(`Added ${r.add.length} condition${r.add.length === 1 ? '' : 's'} from your library`, { kind: 'ok', timeout: 2200 });
+  } else if (r.changed) toast('Library updated', { timeout: 1500 });
+}
+
+// ---------- Flagged markups (assistant work that needs a human look) ----------
+async function reviewNext() {
+  const order = orderedPageKeys();
+  const flagged = store.project.markups
+    .filter((m) => m.review)
+    .sort((a, b) => order.indexOf(a.pageKey) - order.indexOf(b.pageKey));
+  if (!flagged.length) return toast('Nothing flagged for review.', { kind: 'ok', timeout: 2000 });
+  const cur = flagged.findIndex((m) => m.id === store.ui.selectedMarkupId);
+  const m = flagged[(cur + 1) % flagged.length] || flagged[0];
+  if (store.ui.view !== 'takeoff') setView('takeoff');
+  if (store.ui.pageKey !== m.pageKey) await goToPage(m.pageKey);
+  if (store.ui.tool !== 'select') await setTool('select');
+  store.ui.selectedMarkupId = m.id;
+  store.ui.activeConditionId = m.conditionId;
+  if (panels.right) togglePanel('right');
+  setRightTab('props');
+  const xs = m.points.map((q) => q[0]),
+    ys = m.points.map((q) => q[1]);
+  const x0 = Math.min(...xs),
+    y0 = Math.min(...ys);
+  viewer.fitRect([x0, y0, Math.max(...xs) - x0, Math.max(...ys) - y0], 0.35);
+  refresh('ui');
+  toast(`Flagged ${flagged.indexOf(m) + 1} of ${flagged.length}: ${m.review}`, { timeout: 3500 });
+}
+
+// ---------- Command palette ----------
+function paletteItems() {
+  const items = [];
+  const A = (label, run, o = {}) => items.push({ label, run, group: o.group || 'Actions', icon: o.icon, keys: o.keys, hint: o.hint, top: o.top });
+  A('Linear takeoff (LF)', () => setTool('linear'), { icon: 'linear', keys: 'L', top: true });
+  A('Area takeoff (SF)', () => setTool('area'), { icon: 'area', keys: 'A', top: true });
+  A('Fill a room / zone', () => setTool('fill'), { icon: 'bucket', keys: 'B', top: true });
+  A('Ask the assistant', () => openAssistant(), { icon: 'sparkle', keys: '/', top: true });
+  A('Roof takeoff', () => setTool('roof'), { icon: 'roof', keys: 'R' });
+  A('Count takeoff', () => setTool('count'), { icon: 'count', keys: 'C' });
+  A('Quick measure', () => setTool('measure'), { icon: 'measure', keys: 'M' });
+  A('Calibrate scale', () => setTool('calibrate'), { icon: 'calibrate', keys: 'K' });
+  A('Read scales from title blocks (all sheets)', () => detectScales(orderedPageKeys(), true), { icon: 'calibrate' });
+  A('New condition…', () => newCondition(), { icon: 'plus' });
+  A('Condition library…', () => openLibrary(), { icon: 'layers' });
+  A('Next flagged markup (assistant review)', () => reviewNext(), { icon: 'search' });
+  A('Save all conditions to library', () => saveToLibrary(store.project.conditions.map((c) => c.id)), { icon: 'layers' });
+  A('Add drawings (PDF)…', addPdfs, { icon: 'filePlus', keys: 'Ctrl+Shift+O' });
+  A('Open project…', () => openProject(), { icon: 'folder', keys: 'Ctrl+O' });
+  A('Save', () => saveProject(), { icon: 'save', keys: 'Ctrl+S' });
+  A('Save as…', () => saveProject(true), { icon: 'save', keys: 'Ctrl+Shift+S' });
+  A('Export estimate (CSV)', exportCsv, { icon: 'download', keys: 'Ctrl+E' });
+  A('Go to estimate', () => setView('estimate'), { icon: 'table', keys: 'Ctrl+2' });
+  A('Go to takeoff', () => setView('takeoff'), { icon: 'layers', keys: 'Ctrl+1' });
+  A('Toggle snap to plan lines', toggleSnap, { icon: 'magnet', keys: 'S' });
+  A('Toggle dark drawings', toggleDarkDrawings, { icon: 'moon', keys: 'Ctrl+Shift+D', group: 'Appearance' });
+  A('Toggle light / dark theme', () => cycleBase(), { icon: 'sun', keys: 'Ctrl+Shift+T', group: 'Appearance' });
+  for (const t of THEMES) A(`Theme: ${t.name}`, () => setAppearance({ theme: t.id, system: false }), { icon: 'sun', group: 'Appearance' });
+  for (const m of DRAWING_MODES) A(`Drawings: ${m.name}`, () => setAppearance({ drawing: m.id }), { icon: 'file', group: 'Appearance', hint: m.hint });
+  A('Hide / show both side panels', () => togglePanel('both'), { icon: 'fit', keys: '\\' });
+  A('Settings…', openSettings, { icon: 'gear', keys: 'Ctrl+,' });
+  A('Keyboard shortcuts', shortcutsDialog, { icon: 'tag', keys: 'F1' });
+  A('Check for updates', () => {
+    manualCheck = true;
+    api.updater.check();
+  }, { icon: 'refresh' });
+  A('Close current PDF', closeCurrentDrawing, { icon: 'x' });
+  A('Close project', closeProject, { icon: 'x', keys: 'Ctrl+W' });
+  for (const k of orderedPageKeys()) {
+    const pg = store.project.pages[k];
+    items.push({ label: pg.name, hint: pg.scale ? pg.scale.label : 'no scale', group: 'Sheets', icon: 'sheets', run: () => goToPage(k) });
+  }
+  for (const c of store.project.conditions) {
+    items.push({ label: c.name, hint: (c.group ? c.group + ' · ' : '') + TYPE_INFO[c.type].label, group: 'Conditions', dot: c.color, run: () => activateCondition(c.id) });
+  }
+  return items;
+}
+async function showPalette() {
+  const items = paletteItems();
+  if (api.recent) {
+    for (const r of (await api.recent.list()).slice(0, 8)) items.push({ label: r.name, hint: r.path, group: 'Recent projects', icon: 'folder', run: () => openProject(r.path) });
+  }
+  openPalette(items);
+}
 $('#condSearch').addEventListener('input', renderConditions);
 $('#projectName').addEventListener('change', (e) => {
   const v = e.target.value.trim() || 'Untitled project';
@@ -1416,6 +1562,8 @@ function menuCmd(name, arg) {
       return closeCurrentDrawing();
     case 'settings':
       return openSettings();
+    case 'palette':
+      return showPalette();
     case 'open':
       return openProject();
     case 'open-project-path':
@@ -1450,6 +1598,8 @@ function menuCmd(name, arg) {
       return togglePanel('both');
     case 'toggle-theme':
       return toggleTheme();
+    case 'toggle-dark-drawings':
+      return toggleDarkDrawings();
     case 'shortcuts':
       return shortcutsDialog();
     case 'about':
@@ -1463,6 +1613,62 @@ api.onMenu(menuCmd);
 
 api.onCloseRequested(async () => {
   if (await confirmDiscard('close')) api.confirmClose();
+});
+
+// ---------- Autosave & recovery ----------
+let autosaving = false;
+async function autosaveNow() {
+  if (!api.autosave || autosaving || !store.dirty || !store.project.documents.length) return;
+  autosaving = true;
+  try {
+    const text = await projectText();
+    await api.autosave.write({ id: store.project.id, name: store.project.name, path: store.filePath, text });
+    $('#statusSaved').textContent = 'Autosaved ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch (e) {
+    console.warn('autosave', e);
+  }
+  autosaving = false;
+}
+setInterval(autosaveNow, 90 * 1000);
+
+async function offerRecovery() {
+  if (!api.autosave) return;
+  const list = await api.autosave.list();
+  if (!list.length) return;
+  const a = list[0];
+  const when = new Date(a.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  toast(`Unsaved work found: "${a.name}" from ${when}.`, {
+    actionLabel: 'Recover',
+    timeout: 0,
+    action: async () => {
+      const text = await api.autosave.read(a.id);
+      if (!text) return toast('That recovery copy is no longer available.', { kind: 'err' });
+      await loadProjectText(text, a.path, { recovered: true });
+    },
+  });
+}
+setTimeout(offerRecovery, 800);
+
+// ---------- Recent projects (start screen) ----------
+async function renderRecent() {
+  const box = $('#recentList');
+  if (!box || !api.recent) return;
+  const list = await api.recent.list();
+  box.hidden = !list.length;
+  box.innerHTML = list.length
+    ? `<div class="recent-head">Recent projects</div>` +
+      list
+        .slice(0, 6)
+        .map(
+          (r) => `<button class="recent-item" data-path="${esc(r.path)}" title="${esc(r.path)}">${icon('file', 15)}<span class="r-name">${esc(r.name)}</span><span class="r-when">${esc(new Date(r.at).toLocaleDateString([], { month: 'short', day: 'numeric' }))}</span></button>`
+        )
+        .join('')
+    : '';
+  box.querySelectorAll('[data-path]').forEach((b) => (b.onclick = () => openProject(b.dataset.path)));
+}
+renderRecent();
+on((what) => {
+  if (what === 'all' && !store.project.documents.length) renderRecent();
 });
 
 // ---------- Updater UI ----------
@@ -1530,4 +1736,4 @@ async function installUpdate() {
 }
 
 // Expose a tiny hook for automated smoke tests.
-window.__gridline = { store, view, viewer, addPdfFiles, setTool, goToPage, newCondition, setView, menuCmd };
+window.__gridline = { store, view, viewer, setAppearance, appearancePopover, showPalette, openLibrary, saveToLibrary, addPdfFiles, setTool, goToPage, newCondition, setView, menuCmd };

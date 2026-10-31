@@ -5,6 +5,7 @@ const log = require('electron-log/main');
 const { buildMenu } = require('./menu');
 const updater = require('./updater');
 const ollama = require('./ollama');
+const storage = require('./storage');
 
 log.initialize();
 log.transports.file.level = 'info';
@@ -71,6 +72,7 @@ function createWindow() {
   win.webContents.on('will-navigate', (e) => e.preventDefault());
 
   updater.init(win);
+  storage.init();
   ollama.init(win);
 }
 
@@ -113,6 +115,10 @@ ipcMain.handle('dialog:open-project', async (_e, givenPath) => {
     p = r.filePaths[0];
   }
   const text = await fs.readFile(p, 'utf8');
+  try {
+    const name = (text.match(/"name":"([^"]{0,120})"/) || [])[1] || path.basename(p, '.gridline');
+    await storage.addRecent({ path: p, name });
+  } catch {}
   return { path: p, text };
 });
 
@@ -130,6 +136,9 @@ ipcMain.handle('dialog:save-project', async (_e, { text, path: currentPath, name
   const tmp = p + '.tmp';
   await fs.writeFile(tmp, text, 'utf8');
   await fs.rename(tmp, p);
+  try {
+    await storage.addRecent({ path: p, name: name || path.basename(p, '.gridline') });
+  } catch {}
   return p;
 });
 

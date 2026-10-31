@@ -157,6 +157,14 @@ export function drawOverlay(draft = null, measure = null, snap = null) {
     if (isSel && m.type !== 'count') out += handles(m.points, color, px);
   }
 
+  // Assistant markups that need a human look get an amber "?" badge.
+  for (const m of store.project.markups) {
+    if (!m.review || m.pageKey !== view.pageKey || hidden.has(m.conditionId)) continue;
+    const [cx, cy] = m.type === 'linear' ? midpointOfPolyline(m.points) : centroid(m.points);
+    const r = px(9);
+    labels += `<g class="mk" data-id="${m.id}" style="cursor:pointer"><circle cx="${cx + px(14)}" cy="${cy - px(14)}" r="${r}" fill="#f5a524" stroke="#1a1204" stroke-width="1.5" vector-effect="non-scaling-stroke"/><text x="${cx + px(14)}" y="${cy - px(14) + px(4)}" text-anchor="middle" font-size="${px(12)}" fill="#1a1204" stroke="none">?</text></g>`;
+  }
+
   // Count numbering per condition on this page (helps verify).
   if (showLabels) {
     const seen = {};
