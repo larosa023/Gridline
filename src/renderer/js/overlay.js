@@ -134,6 +134,7 @@ export function drawOverlay(draft = null, measure = null, snap = null) {
             qty = `${fmtNum(net / k2, 1)} ${UNIT_LABELS[store.project.unit].area} net`;
           }
         }
+        if (+m.mult > 1) qty += ` ×${+m.mult}`;
         const text = m.label && !m.deduct ? `${m.label}: ${qty}` : qty;
         const need = text.length * 6.5;
         if (hpx >= 14 && wpx >= Math.min(need, 70)) {
@@ -146,7 +147,7 @@ export function drawOverlay(draft = null, measure = null, snap = null) {
       out += `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="${isSel ? 5 : 3.5}" stroke-opacity="0.9" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round" pointer-events="none"/>`;
       if (showLabels) {
         const [mx, my] = midpointOfPolyline(m.points);
-        labels += label(mx, my - px(10), lengthLabel(m.points, m.pageKey, false, lineFactor(c, m)), color, fs, z);
+        labels += label(mx, my - px(10), lengthLabel(m.points, m.pageKey, false, lineFactor(c, m)) + (+m.mult > 1 ? ` ×${+m.mult}` : ''), color, fs, z);
       }
     } else if (m.type === 'count') {
       const r = px(isSel ? 8 : 7);

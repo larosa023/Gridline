@@ -174,3 +174,14 @@ test('reads scales from title block text', () => {
   close(s(`3/4" = 1'-0" 3/4" = 1'-0" SCALE: 1/8" = 1'-0"`).ptPerUnit, 9);
   assert.equal(findScalesInText(`1/4" = 1'-0" and 1/2" = 1'-0"`).length, 2);
 });
+
+test('typical multiplier scales every quantity of a markup', () => {
+  const k = 18;
+  const scaleFor = () => ({ ptPerUnit: k, unit: 'ft' });
+  const sq = [[0, 0], [10 * k, 0], [10 * k, 10 * k], [0, 10 * k]];
+  const t = conditionTotals({ id: 'a', type: 'area', unit: 'ft' }, [{ conditionId: 'a', type: 'area', points: sq, pageKey: 'p', mult: 4 }, { conditionId: 'a', type: 'area', points: sq, pageKey: 'p' }], scaleFor);
+  close(t.area, 500);
+  close(t.perimeter, 200);
+  const c = conditionTotals({ id: 'c', type: 'count' }, [{ conditionId: 'c', type: 'count', points: [[1, 1]], pageKey: 'p', mult: 3 }], scaleFor);
+  assert.equal(c.count, 3);
+});

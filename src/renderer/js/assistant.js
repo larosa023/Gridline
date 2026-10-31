@@ -53,6 +53,24 @@ export function initAssistant(appApi, hooks) {
   api = appApi;
   ctx = hooks;
   state.model = pref('gridline-ai-model', RECOMMENDED_MODEL);
+  state.thinkMode = pref('gridline-ai-think', 'auto');
+  if (api.ai && api.ai.onDelta)
+    api.ai.onDelta((d) => {
+      const st = state.stream;
+      if (!st || d.id !== st.id) return;
+      const pending = document.querySelector('#aiLog .ai-msg.pending .txt');
+      if (!pending) return;
+      if (d.thinking) {
+        st.thinking += d.thinking;
+        const tail = st.thinking.replace(/\s+/g, ' ').slice(-90);
+        pending.textContent = 'Thinking… ' + tail;
+      }
+      if (d.content) {
+        st.text += d.content;
+        const t = stripThink(st.text);
+        if (t && !/^\s*[\[{<]/.test(t)) pending.textContent = t.slice(-400);
+      }
+    });
   if (api.ai) {
     api.ai.setBase(pref('gridline-ai-base', 'http://127.0.0.1:11434'));
     api.ai.onPullProgress((p) => {
@@ -77,6 +95,7 @@ function sheetList() {
 function resolveSheet(ref) {
   const list = sheetList();
   if (ref == null || ref === '' || /^(current|this)( sheet)?$/i.test(String(ref))) return store.ui.pageKey || (list[0] && list[0].key);
+  if (typeof ref === 'string' && store.project.pages[ref]) return ref; // internal calls pass page keys
   const s = String(ref).trim().toLowerCase();
   let hit = list.find((x) => (x.pg.name || '').toLowerCase() === s);
   if (!hit && /^\d+$/.test(s)) hit = list[+s - 1];
@@ -189,6 +208,49 @@ function findZoneInfo(id) {
 const LABEL_PROP = { label: { type: 'string', description: 'Where this is, e.g. "Elev 1 – Front" or "Unit 2B". Shown in the estimate breakdown.' } };
 
 const TOOL_DEFS = [
+  {
+    name: 'takeoff_finishes',
+    description:
+      'ONE CALL for a whole finish takeoff on a sheet of elevations (or plans with finish tags): finds and reads the finish schedule/legend, creates a tagged area condition for every tag used on the sheet, then measures every drawing view by tag with openings deducted. Returns per-view and per-condition totals and any zones left to decide. Prefer this over doing the steps one by one.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sheet: { type: 'string', description: 'Sheet with the elevations/plans to measure' },
+        schedule_sheet: { type: 'string', description: 'Sheet with the finish schedule, if known (otherwise searched)' },
+        schedule_title: { type: 'string', description: 'e.g. "EXTERIOR FINISH SCHEDULE" (optional)' },
+        deduct_openings: { type: 'boolean' },
+      },
+      required: ['sheet'],
+    },
+  },
+  {
+    name: 'room_finishes',
+    description:
+      'ONE CALL for flooring (or ceiling) by room: reads the room finish schedule, groups rooms by their floor finish, creates an area condition per finish and fills each room on the plan by its room number. Returns SF per finish and rooms that could not be closed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        plan_sheet: { type: 'string', description: 'Floor plan with room numbers' },
+        schedule_sheet: { type: 'string', description: 'Sheet with the room finish schedule (otherwise searched)' },
+        column: { type: 'string', description: 'Schedule column to group by (default the FLOOR column; e.g. "CEILING")' },
+      },
+      required: ['plan_sheet'],
+    },
+  },
+  {
+    name: 'count_schedule_marks',
+    description:
+      'ONE CALL for doors or windows: reads the door/window schedule, creates a count condition per type and places a count on each mark found on the plans. Returns schedule quantities by type next to what was found on the drawings.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['door', 'window'] },
+        plan_sheets: { type: 'array', items: { type: 'string' }, description: 'Plan sheets to place counts on, or ["all"]' },
+        schedule_sheet: { type: 'string', description: 'Sheet with the schedule (otherwise searched)' },
+      },
+      required: ['kind'],
+    },
+  },
   {
     name: 'get_overview',
     description: 'Get the project: sheets (name, scale, markup count), conditions with quantities, the current sheet, units and sheet size in points.',
@@ -421,10 +483,224 @@ function toolSchemas(vision) {
   return TOOL_DEFS.filter((t) => !t.vision || vision).map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
 }
 
+// ---- schedule helpers used by the one-call workflow tools ----
+async function findSchedule(titles, prefer) {
+  const keys = [];
+  if (prefer) keys.push(...[].concat(prefer).map((x) => resolveSheet(x)));
+  for (const x of sheetList()) if (!keys.includes(x.key)) keys.push(x.key);
+  for (const key of keys) {
+    const { items } = await viewer.getPageText(key);
+    for (const t of titles) {
+      if (!items.some((it) => it.str.toLowerCase().includes(t.toLowerCase()))) continue;
+      const sch = parseSchedule(items, { title: t });
+      if (sch && sch.rows.length) return { key, sch };
+    }
+  }
+  return null;
+}
+function pickColumn(sch, headerRe, cellTest, exclude = []) {
+  let best = -1;
+  let bestScore = 0;
+  sch.columns.forEach((h, i) => {
+    if (exclude.includes(i)) return;
+    let score = sch.rows.filter((r) => r[i] && (!cellTest || cellTest(String(r[i]).trim()))).length;
+    if (headerRe && headerRe.test(h)) score += sch.rows.length + 1;
+    if (score > bestScore) (best = i), (bestScore = score);
+  });
+  return best;
+}
+/** Text items on a sheet that are not part of a schedule/legend table (so a room number in a schedule isn't taken for the room tag). */
+async function drawingText(key, extraBoxes = []) {
+  const { items } = await viewer.getPageText(key);
+  const boxes = (await viewsFor(key)).filter((v) => v.kind === 'table' && v.box).map((v) => v.box).concat(extraBoxes);
+  if (!boxes.length) return items;
+  const inBox = (pt, b) => pt[0] >= b[0] - 6 && pt[0] <= b[0] + b[2] + 6 && pt[1] >= b[1] - 30 && pt[1] <= b[1] + b[3] + 6;
+  return items.filter((it) => !boxes.some((b) => inBox(textCenter(it), b)));
+}
+const titleCase = (s) => String(s).toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+
 async function runTool(name, args, out) {
   args = args || {};
   const p = store.project;
   switch (name) {
+    case 'takeoff_finishes': {
+      const key = resolveSheet(args.sheet);
+      if (!p.pages[key].scale) throw new Error(`Sheet ${sheetName(key)} has no scale yet. Set it first (set_scale with "detect").`);
+      const titles = args.schedule_title ? [String(args.schedule_title)] : ['FINISH SCHEDULE', 'MATERIAL SCHEDULE', 'FINISH LEGEND', 'MATERIAL LEGEND', 'EXTERIOR FINISHES', 'MATERIALS', 'LEGEND'];
+      const found = await findSchedule(titles, args.schedule_sheet || args.sheet);
+      const { items } = await viewer.getPageText(key);
+      const onSheet = new Set(items.map((it) => normTag(it.str)).filter(Boolean));
+      const created = [];
+      const using = [];
+      if (found) {
+        const { sch } = found;
+        const tagCol = pickColumn(sch, /TAG|MARK|KEY|SYM|CODE|ID/i, (v) => v.length <= 8 && !!normTag(v));
+        const descCol = pickColumn(sch, /DESC|MATERIAL|FINISH|PRODUCT|ITEM|TYPE/i, (v) => v.length > 3 && !normTag(v), [tagCol]);
+        for (const r of sch.rows) {
+          const tag = normTag(r[tagCol]);
+          if (!tag || String(r[tagCol]).trim().length > 8) continue;
+          if (onSheet.size && !onSheet.has(tag)) continue; // only tags used on this sheet
+          const existing = p.conditions.find((c) => normTag(c.tag) === tag);
+          if (existing) {
+            using.push(existing.name);
+            continue;
+          }
+          const desc = descCol >= 0 && r[descCol] ? titleCase(String(r[descCol]).trim()).slice(0, 60) : tag;
+          await runTool('create_condition', { name: `${tag} ${desc}`.trim(), type: 'area', group: 'Finishes', tag }, out);
+          created.push(`${tag} ${desc}`);
+        }
+      }
+      if (!p.conditions.some((c) => (c.type === 'area' || c.type === 'roof') && normTag(c.tag)))
+        throw new Error(found ? `Read "${found.sch.title}" on ${sheetName(found.key)} but found no finish tags used on ${sheetName(key)}.` : 'No finish schedule or legend found in the project. Create tagged conditions with create_condition, then run measure_by_tags.');
+      const vs = (await viewsFor(key)).filter((v) => v.kind !== 'table');
+      const targets = vs.length ? vs : [{ box: null, title: sheetName(key) }];
+      const views = [];
+      const totals = new Map();
+      const toDecide = [];
+      for (const v of targets) {
+        const label = v.box ? `${v.number ? v.number + ' – ' : ''}${v.title}` : undefined;
+        try {
+          const r = await runTool('measure_by_tags', { sheet: key, ...(v.box ? { box: v.box } : {}), ...(label ? { label } : {}), deduct_openings: args.deduct_openings }, out);
+          views.push({ view: label || sheetName(key), measured: r.measured.map((e) => `${e.condition}: ${e.net_sf} SF net${e.flagged ? ` (${e.flagged} flagged)` : ''}`), unassigned: r.unassigned_zones.length });
+          for (const e of r.measured) {
+            const t = totals.get(e.condition) || { condition: e.condition, net_sf: 0, openings_sf: 0, flagged: 0 };
+            t.net_sf += e.net_sf;
+            t.openings_sf += e.openings_sf;
+            t.flagged += e.flagged;
+            totals.set(e.condition, t);
+          }
+          for (const z of r.unassigned_zones) toDecide.push({ view: label || sheetName(key), ...z });
+          if (r.conflicts.length) views[views.length - 1].conflicts = r.conflicts;
+        } catch (e) {
+          views.push({ view: label || sheetName(key), error: String(e.message || e) });
+        }
+      }
+      return {
+        sheet: sheetName(key),
+        schedule: found ? { sheet: sheetName(found.key), title: found.sch.title } : null,
+        conditions_created: created,
+        conditions_used: using,
+        views,
+        totals: [...totals.values()].map((t) => ({ ...t, net_sf: +t.net_sf.toFixed(1), openings_sf: +t.openings_sf.toFixed(1) })),
+        zones_to_decide: toDecide.slice(0, 20),
+        next: toDecide.length ? 'Look at each zone to decide (look_at_sheet on its box_pt) and measure_regions it if it is a finish. Then review_markups.' : 'Run review_markups to check, then summarize.',
+      };
+    }
+    case 'room_finishes': {
+      const key = resolveSheet(args.plan_sheet);
+      if (!p.pages[key].scale) throw new Error(`Sheet ${sheetName(key)} has no scale yet. Set it first.`);
+      const found = await findSchedule(['ROOM FINISH SCHEDULE', 'FINISH SCHEDULE', 'ROOM SCHEDULE'], args.schedule_sheet);
+      if (!found) throw new Error('No room finish schedule found. Try search_project for "FINISH SCHEDULE", or use fill_rooms directly.');
+      const { sch } = found;
+      const roomCol = pickColumn(sch, /ROOM|NO\.?$|NUM|#/i, (v) => /^[A-Z]?\d{2,4}[A-Z]?$/i.test(v));
+      const want = args.column ? new RegExp(String(args.column).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : /FLOOR|FLR/i;
+      let finCol = sch.columns.findIndex((h, i) => i !== roomCol && want.test(h) && !/BASE/i.test(h));
+      if (finCol < 0) throw new Error(`No ${args.column || 'FLOOR'} column in "${sch.title}". Columns: ${sch.columns.join(', ')}`);
+      const nameCol = pickColumn(sch, /NAME|ROOM NAME|SPACE/i, (v) => /[A-Z]{3,}/i.test(v) && !/^\d/.test(v), [roomCol, finCol]);
+      const groups = new Map();
+      for (const r of sch.rows) {
+        const room = String(r[roomCol] || '').trim();
+        const fin = String(r[finCol] || '').trim();
+        if (!room || !fin || !/\d/.test(room) || /^(-|—|N\/?A|NONE)$/i.test(fin)) continue;
+        if (!groups.has(fin)) groups.set(fin, []);
+        groups.get(fin).push(room);
+      }
+      if (!groups.size) throw new Error(`Read "${sch.title}" but no rooms with a ${sch.columns[finCol]} value.`);
+      const colName = titleCase(sch.columns[finCol]).replace(/ Finish$/i, '');
+      const result = [];
+      const items = await drawingText(key, found.key === key ? [sch.box] : []);
+      const names = new Map();
+      if (nameCol >= 0) for (const r of sch.rows) names.set(String(r[roomCol] || '').trim(), String(r[nameCol] || '').trim());
+      for (const [fin, rooms] of groups) {
+        const cname = `${colName} – ${fin}`;
+        if (!p.conditions.find((c) => c.name.toLowerCase() === cname.toLowerCase())) await runTool('create_condition', { name: cname, type: 'area', group: '09 – Finishes', tag: normTag(fin) || undefined }, out);
+        let filled = 0;
+        let sf = 0;
+        const problems = [];
+        for (const room of rooms) {
+          const re = new RegExp(`(^|[^A-Za-z0-9])${room.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9]|$)`, 'i');
+          const hits = items.filter((it) => re.test(it.str));
+          if (!hits.length) {
+            problems.push({ room, result: 'room number not found on the plan' });
+            continue;
+          }
+          const lab = `${names.get(room) && !hits[0].str.toUpperCase().includes(names.get(room).toUpperCase()) ? names.get(room) + ' ' : ''}${hits[0].str}`.trim();
+          const r = await runTool('fill_rooms', { sheet: key, condition: cname, points: [textCenter(hits[0])], label: lab }, out);
+          const rr = r.rooms[0] || {};
+          if (rr.sf) (filled++, (sf += rr.sf));
+          else if (rr.result !== 'already measured') problems.push({ room, result: rr.result, at: textCenter(hits[0]).map(Math.round) });
+        }
+        result.push({ finish: fin, condition: cname, rooms: rooms.length, filled, sf: +sf.toFixed(1), problems });
+      }
+      return {
+        plan: sheetName(key),
+        schedule: { sheet: sheetName(found.key), title: sch.title, column: sch.columns[finCol], room_names: nameCol >= 0 ? 'read' : 'none' },
+        by_finish: result,
+        total_sf: +result.reduce((a, r) => a + r.sf, 0).toFixed(1),
+        next: result.some((r) => r.problems.length) ? 'Rooms that could not be closed usually have an open doorway: fill them with points inside, or draw_markup. Then review_markups.' : 'Run review_markups to check.',
+      };
+    }
+    case 'count_schedule_marks': {
+      const kind = args.kind === 'window' ? 'window' : 'door';
+      const K = kind.toUpperCase();
+      const found = await findSchedule([`${K} SCHEDULE`, `${K} AND FRAME SCHEDULE`, `${K} TYPES`], args.schedule_sheet);
+      if (!found) throw new Error(`No ${kind} schedule found. Try search_project for "${K} SCHEDULE".`);
+      const { sch } = found;
+      const markCol = pickColumn(sch, /MARK|NO\.?$|NUM|TAG|#|^DOOR$|^WINDOW$/i, (v) => /^[A-Z]?\d{1,4}[A-Z]?$|^[A-Z]{1,2}-?\d{0,3}$/i.test(v));
+      const typeCol = pickColumn(sch, /TYPE/i, (v) => v.length <= 12, [markCol]);
+      const qtyCol = sch.columns.findIndex((h) => /QTY|QUANT|COUNT/i.test(h));
+      const sheetKeys = !args.plan_sheets || !args.plan_sheets.length ? [store.ui.pageKey].filter(Boolean) : args.plan_sheets.flatMap((x) => (String(x).toLowerCase() === 'all' ? sheetList().map((s2) => s2.key) : [resolveSheet(x)]));
+      const texts = new Map();
+      for (const k2 of sheetKeys) texts.set(k2, await drawingText(k2, found.key === k2 ? [sch.box] : []));
+      const byType = new Map();
+      for (const r of sch.rows) {
+        const mark = String(r[markCol] || '').trim();
+        if (!mark || mark.length > 8) continue;
+        const type = (typeCol >= 0 && String(r[typeCol] || '').trim()) || mark;
+        const qty = qtyCol >= 0 ? parseInt(r[qtyCol], 10) || 1 : 1;
+        if (!byType.has(type)) byType.set(type, { marks: [], schedule_qty: 0 });
+        const t = byType.get(type);
+        t.marks.push(mark);
+        t.schedule_qty += qty;
+      }
+      if (!byType.size) throw new Error(`Read "${sch.title}" but could not find a mark column. Columns: ${sch.columns.join(', ')}`);
+      const typeBased = qtyCol >= 0; // window types repeat on plans; door marks are unique
+      const out2 = [];
+      const missing = [];
+      const repeated = [];
+      for (const [type, t] of byType) {
+        const cname = `${titleCase(kind)} – ${/^type/i.test(type) ? type : 'Type ' + type}`;
+        let c = p.conditions.find((x) => x.name.toLowerCase() === cname.toLowerCase());
+        if (!c) {
+          await runTool('create_condition', { name: cname, type: 'count', group: kind === 'door' ? '08 – Openings' : '08 – Openings' }, out);
+          c = p.conditions.find((x) => x.name === cname);
+        }
+        const made = [];
+        for (const mark of t.marks) {
+          const re = new RegExp(`^\\s*${mark.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+          const hits = [];
+          for (const [k2, its] of texts) for (const it of its) if (re.test(it.str)) hits.push({ k2, pt: textCenter(it) });
+          if (!hits.length) missing.push(mark);
+          else if (!typeBased && hits.length > 1) repeated.push(`${mark} ×${hits.length}`);
+          const use = typeBased ? hits : hits.slice(0, 1);
+          for (const h2 of use) {
+            const dup = p.markups.concat(made).some((m) => m.pageKey === h2.k2 && m.conditionId === c.id && Math.hypot(m.points[0][0] - h2.pt[0], m.points[0][1] - h2.pt[1]) < 4);
+            if (!dup) made.push({ id: uid('mk'), conditionId: c.id, pageKey: h2.k2, type: 'count', points: [h2.pt], label: mark, ...(!typeBased && hits.length > 1 ? { review: `Mark ${mark} appears ${hits.length}× — check this is the ${kind} tag` } : {}) });
+          }
+        }
+        addMarkups(made);
+        if (made.length) out.changed = true;
+        out2.push({ condition: cname, schedule_qty: t.schedule_qty, placed: made.length });
+      }
+      return {
+        schedule: { sheet: sheetName(found.key), title: sch.title, rows: sch.rows.length },
+        by_type: out2,
+        total_schedule_qty: out2.reduce((a, x) => a + x.schedule_qty, 0),
+        not_found_on_plans: missing.slice(0, 30),
+        repeated_marks: repeated.slice(0, 20),
+        note: 'The schedule quantity is the reliable count; placed counts show where they are. Report any difference.',
+      };
+    }
     case 'get_overview': {
       const sheets = [];
       for (const x of sheetList()) {
@@ -559,7 +835,7 @@ async function runTool(name, args, out) {
       const seeds = [];
       if (Array.isArray(args.points) && args.points.length) for (const q of args.points) seeds.push({ label: `point ${q.map(Math.round).join(',')}`, p: q.map(Number) });
       if (Array.isArray(args.rooms) && args.rooms.length) {
-        const { items } = await viewer.getPageText(key);
+        const items = await drawingText(key);
         if (args.rooms.some((r) => String(r).toLowerCase() === 'all')) {
           for (const it of roomLabelItems(items, sz.w, sz.h)) seeds.push({ label: it.str, p: textCenter(it) });
         } else {
@@ -986,34 +1262,51 @@ async function runTool(name, args, out) {
 }
 
 function systemPrompt(vision) {
-  const notes = store.project.aiNotes || [];
-  const conds = store.project.conditions.map((c) => `${c.name} (${c.type}${c.tag ? ', tag ' + c.tag : ''})`).slice(0, 60);
+  // Kept identical between requests so Ollama can reuse its cached prompt (much faster).
+  // Project state goes in contextMessage() instead.
   return `You are the takeoff assistant inside Gridline, a construction quantity takeoff and estimating app, working for a professional commercial estimator. You run entirely on their PC. Precision matters more than speed: every quantity you produce goes into a bid.
 
-PROJECT: "${store.project.name}" · ${store.project.unit === 'm' ? 'metric' : 'imperial'} · ${sheetList().length} sheets · current sheet ${store.ui.pageKey ? sheetName(store.ui.pageKey) : 'none'}
-CONDITIONS: ${conds.length ? conds.join('; ') : 'none yet'}
-${notes.length ? 'PROJECT NOTES (from earlier work — follow them):\n- ' + notes.join('\n- ') : ''}
+Each request starts with a PROJECT CONTEXT message describing the current project, sheets, conditions and saved notes — use it.
 
 HOW TO WORK
 1. For anything with more than two steps, call plan first, then update it (done: [...]) as you finish steps.
 2. Find information, don't guess it: search_project to locate schedules/legends/notes across sheets; read_schedule for tables; list_views for the views on a sheet; read_sheet_text / find_text for notes; ${vision ? 'look_at_sheet to see the drawing when geometry or text is ambiguous.' : '(you cannot see images; rely on text and geometry tools).'}
-3. Measure with the geometry tools — they are exact: measure_by_tags (finishes with tags), find_regions + measure_regions / measure_similar (closed zones), fill_rooms (rooms by label), count_text (tags), count_symbols (repeated symbols). Use draw_markup only when nothing else works; it is flagged for review.
+3. Measure with the geometry tools — they are exact: the one-call workflows below, measure_by_tags (finishes with tags), find_regions + measure_regions / measure_similar (closed zones), fill_rooms (rooms by label), count_text (tags), count_symbols (repeated symbols). Use draw_markup only when nothing else works; it is flagged for review.
 4. Never do arithmetic in your head — use calculate. Never invent quantities, tags, sheets or conditions; use only names that exist or that you just created (errors suggest the right name).
 5. Every sheet must have a scale before measuring (set_scale "detect" reads title blocks). Check each view's scale from list_views matches the sheet.
 6. Label every markup with its view or area (e.g. "1 – Front Elevation", "Level 2") so the estimate breaks down.
 7. Save decisions the estimator would want kept with remember (e.g. "BR-1 = Brick veneer, modular, per A-701").
 
-EXTERIOR FINISHES (elevations)
-- Find the finish/material schedule (search_project "FINISH SCHEDULE" or "MATERIAL", or the sheet a note references) and read_schedule it.
-- Create one area condition per exterior material, named from the schedule description, group "Exterior finishes", with its tag (e.g. tag "BR-1").
-- For each view from list_views: measure_by_tags. Then resolve its unassigned zones one by one (look at the box; measure_regions into the right condition, or skip glazing/doors/louvers/other trades). Conflicts mean two tags in one zone — look and decide.
-- Openings are deducted automatically. Glazing and storefront are not wall finish.
+ONE-CALL WORKFLOWS (fastest and most reliable — use them first, then fix what they report)
+- Exterior or interior finishes on elevations / tagged plans: takeoff_finishes(sheet). It reads the schedule, creates tagged conditions, measures every view and deducts openings. Then resolve zones_to_decide one by one (look at the box; measure_regions into the right condition, or skip glazing/doors/louvers/other trades). Conflicts mean two tags in one zone — look and decide.
+- Flooring or ceilings by room: room_finishes(plan_sheet). Then handle rooms it could not close (fill_rooms with points, or draw_markup).
+- Doors and windows: count_schedule_marks(kind, plan_sheets). Report the schedule quantity per type and any marks not found.
+- If a workflow tool errors (no schedule, no tags), fall back to the step-by-step tools below.
 
-FLOOR PLANS: fill_rooms with room labels ("all" for every numbered room) into the right finish condition (use the room finish schedule if there is one). Count doors/fixtures with count_text on their tags or count_symbols on one example.
+STEP BY STEP (when no one-call workflow fits)
+- Elevations: read_schedule → create_condition per material with its tag → list_views → measure_by_tags per view.
+- Openings are deducted automatically. Glazing and storefront are not wall finish.
+- Floor plans: fill_rooms with room labels ("all" for every numbered room). Count fixtures with count_text on their tags or count_symbols on one example.
 
 FINISHING UP
 - When done, Gridline asks you to review_markups; fix problems you see.
 - Final reply: one line per condition with total and unit, then the breakdown by view/label, then anything flagged or not measured (so the estimator can check it). Plain sentences and short lists; no tables; no invented numbers.`;
+}
+
+/** Project state for this request (sent once per request, just before the user's message). */
+function contextMessage() {
+  const p = store.project;
+  const notes = p.aiNotes || [];
+  const conds = p.conditions.map((c) => `${c.name} (${c.type}${c.tag ? ', tag ' + c.tag : ''})`).slice(0, 80);
+  const sheets = sheetList().map((x) => `${x.pg.name}${x.pg.scale ? '' : ' (no scale)'}`);
+  return [
+    `PROJECT CONTEXT — "${p.name}" · ${p.unit === 'm' ? 'metric' : 'imperial'} · current sheet: ${store.ui.pageKey ? sheetName(store.ui.pageKey) : 'none'}`,
+    `SHEETS (${sheets.length}): ${sheets.slice(0, 120).join(', ')}${sheets.length > 120 ? ', …' : ''}`,
+    `CONDITIONS: ${conds.length ? conds.join('; ') : 'none yet'}`,
+    notes.length ? 'PROJECT NOTES (decisions from earlier work — follow them):\n- ' + notes.join('\n- ') : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1063,9 +1356,18 @@ async function ask(text) {
   renderInput();
   const caps = await capsFor(state.model);
   const vision = caps.includes('vision');
-  const think = caps.includes('thinking') ? true : undefined;
+  const canThink = caps.includes('thinking');
   addBubble('user', text);
+  // Trim very long conversations at request boundaries only (keeps the cached prefix stable).
+  if (state.history.length > 90) {
+    let cut = state.history.length - 50;
+    while (cut < state.history.length && state.history[cut].role !== 'user') cut++;
+    state.history = state.history.slice(cut);
+  }
+  const prior = state.history.slice();
+  const ctxMsg = { role: 'user', content: contextMessage() };
   state.history.push({ role: 'user', content: text });
+  const reqStart = state.history.length - 1;
   const mark = historyMark();
   const thinking = addBubble('pending', 'Thinking…');
   const id = 'chat' + ++state.reqId;
@@ -1078,6 +1380,10 @@ async function ask(text) {
   let changes = 0;
   let nudges = 0;
   let reviewed = false;
+  let lastError = false;
+  let tokens = 0;
+  let firstLoad = null;
+  const t0 = performance.now();
   const MAX_STEPS = 60;
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
@@ -1089,18 +1395,19 @@ async function ask(text) {
           seenImage = true;
         }
       }
-      // Keep recent tool results whole; shorten older ones so the important context fits.
-      const recent = state.history.slice(-60);
-      const toolIdx = recent.map((m, i) => (m.role === 'tool' ? i : -1)).filter((i) => i >= 0);
-      const keepFull = new Set(toolIdx.slice(-8));
-      const compact = recent.map((m, i) => (m.role === 'tool' && !keepFull.has(i) && m.content.length > 900 ? { ...m, content: m.content.slice(0, 900) + ' …(older result shortened)' } : m));
-      const res = await api.ai.chat({
-        id,
-        model: state.model,
-        think,
-        messages: [{ role: 'system', content: systemPrompt(vision) }, ...compact],
-        tools: toolSchemas(vision),
-      });
+      // Earlier requests (already shortened) + this request's context + everything since.
+      const messages = [{ role: 'system', content: systemPrompt(vision) }, ...prior, ctxMsg, ...state.history.slice(reqStart)];
+      // Think when it pays off: planning the first step, and recovering from an error.
+      const think = !canThink ? undefined : state.thinkMode === 'on' ? true : state.thinkMode === 'off' ? false : step === 0 || lastError || nudges > 0;
+      state.stream = { id, text: '', thinking: '' };
+      const res = await api.ai.chat({ id, model: state.model, think, messages, tools: toolSchemas(vision) });
+      state.stream = null;
+      if (res.stats) {
+        tokens += res.stats.evalCount || 0;
+        if (firstLoad == null) firstLoad = res.stats.loadMs;
+        state.lastStats = res.stats;
+      }
+      lastError = false;
       if (res.cancelled) {
         finalText = actions ? 'Stopped. The changes made so far are kept (you can undo them below).' : 'Stopped.';
         break;
@@ -1169,6 +1476,7 @@ async function ask(text) {
         }
         const v = validateArgs(def.parameters, args);
         if (v.errors.length) {
+          lastError = true;
           result = { error: 'Invalid arguments: ' + v.errors.join(' '), expected: def.parameters };
           state.debug.push({ tool: fn.name, args, result: result.error });
           state.history.push({ role: 'tool', tool_name: fn.name, name: fn.name, content: JSON.stringify(result) });
@@ -1184,6 +1492,7 @@ async function ask(text) {
         } catch (e) {
           result = { error: String(e.message || e) };
           addActivity(fn.name, args, result, true);
+          lastError = true;
         }
         actions++;
         if (out.changed) changes++;
@@ -1201,6 +1510,16 @@ async function ask(text) {
     if (!actions) state.history.pop(); // drop the failed turn so a retry starts clean
   }
   thinking.remove();
+  // Shorten this request's tool results now that it's over, so later requests stay fast and the
+  // conversation prefix stays identical (cache-friendly).
+  for (let i = reqStart; i < state.history.length; i++) {
+    const m = state.history[i];
+    if (m.role === 'tool' && m.content.length > 900) m.content = m.content.slice(0, 900) + ' …(shortened)';
+    if (m.images) delete m.images;
+  }
+  const secs = (performance.now() - t0) / 1000;
+  const sp = state.lastStats && state.lastStats.tokPerSec;
+  $('#aiSpeed').textContent = `${secs < 60 ? secs.toFixed(1) + ' s' : Math.round(secs / 60) + ' min'} · ${tokens} tokens${sp ? ` · ${sp} tok/s` : ''}${firstLoad > 1500 ? ' · model load ' + (firstLoad / 1000).toFixed(1) + ' s' : ''}`;
   const grouped = squashHistory(mark);
   if (finalText) {
     const b = addBubble('assistant', finalText);
@@ -1261,6 +1580,9 @@ function toolLabel(name, a) {
       create_condition: `Creating "${a && a.name}"…`,
       update_condition: `Updating "${a && a.name}"…`,
       fill_rooms: `Measuring rooms${s}…`,
+      takeoff_finishes: `Taking off every finish${s}…`,
+      room_finishes: `Measuring floor finishes room by room${s}…`,
+      count_schedule_marks: `Counting ${(a && a.kind) || 'door'}s from the schedule…`,
       count_text: `Counting "${a && a.text}"${s}…`,
       count_symbols: `Counting symbols${s}…`,
       draw_markup: 'Drawing…',
@@ -1291,6 +1613,12 @@ function activitySummary(name, a, r) {
     }
     case 'count_text':
       return `Counted ${r.added} × "${a.text}" on ${r.sheet}`;
+    case 'takeoff_finishes':
+      return `${r.sheet}: ${r.totals.map((t) => `${t.condition} ${fmtNum(t.net_sf, 1)} SF`).join(' · ') || 'nothing measured'}${r.zones_to_decide.length ? ` · ${r.zones_to_decide.length} zone(s) to decide` : ''}`;
+    case 'room_finishes':
+      return `${r.plan}: ${r.by_finish.map((f) => `${f.finish} ${fmtNum(f.sf, 1)} SF`).join(' · ')}`;
+    case 'count_schedule_marks':
+      return `${r.by_type.map((t) => `${t.condition.replace(/^\w+ – /, '')}: ${t.schedule_qty}`).join(' · ')} (from ${r.schedule.title})`;
     case 'measure_by_tags': {
       const parts = r.measured.map((e) => `${e.condition} ${fmtNum(e.net_sf, 1)} SF`);
       return `${r.view || r.sheet}: ${parts.join(' · ') || 'nothing matched'}${r.unassigned_zones.length ? ` · ${r.unassigned_zones.length} zone(s) to decide` : ''}`;
@@ -1346,7 +1674,7 @@ export async function renderAssistant() {
         <textarea id="aiInput" rows="2" placeholder="Tell me what to take off…"></textarea>
         <button class="btn primary icon-only" id="aiSend" title="Send (Enter)">${icon('send', 16)}</button>
       </div>
-      <div class="ai-foot muted small">Runs on this PC with Ollama · nothing leaves your computer</div>`;
+      <div class="ai-foot muted small"><span id="aiSpeed"></span><span>Runs on this PC · nothing leaves your computer</span></div>`;
     panel.dataset.built = '1';
     const inp = $('#aiInput');
     inp.addEventListener('keydown', (e) => {
@@ -1367,6 +1695,9 @@ export async function renderAssistant() {
         const tags = [caps.includes('tools') ? 'tools' : 'no tools', caps.includes('vision') ? 'vision' : ''].filter(Boolean).join(' · ');
         items.push({ label: `${m.name}  —  ${tags}`, current: m.name === state.model, run: () => setModel(m.name) });
       }
+      items.push('-', { head: 'Thinking' });
+      for (const [k, lab] of [['auto', 'Auto — think when planning or fixing (fastest)'], ['on', 'Always think (slower, most careful)'], ['off', 'Never think (fastest, less careful)']])
+        items.push({ label: lab, current: state.thinkMode === k, run: () => ((state.thinkMode = k), setPref('gridline-ai-think', k)) });
       if (!st.models.some((m) => m.name === RECOMMENDED_MODEL)) items.push('-', { label: `Download ${RECOMMENDED_LABEL} (${RECOMMENDED_SIZE})`, icon: 'download', run: () => { $('#aiInputWrap').hidden = true; pullModel(RECOMMENDED_MODEL); refreshStatus(); } });
       contextMenu(r.left - 120, r.bottom + 4, items);
     };
@@ -1513,6 +1844,10 @@ async function refreshStatus() {
     // Selected model missing but others exist: keep the selection; setup offers both paths.
   }
   const ready = st.running && has(state.model);
+  if (ready && !state.warmed) {
+    state.warmed = true;
+    api.ai.warm && api.ai.warm(state.model); // load into GPU memory now, not on the first question
+  }
   $('#aiModel').textContent = ready ? state.model : '';
   $('#aiInputWrap').hidden = !ready;
   $('#aiLog').hidden = !ready;
@@ -1562,6 +1897,7 @@ function wireSetup(el) {
 
 export function setModel(name) {
   state.model = name;
+  state.warmed = false;
   setPref('gridline-ai-model', name);
   refreshStatus();
 }

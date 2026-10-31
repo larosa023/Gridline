@@ -65,6 +65,13 @@ export async function loadDocument(docId, bytes) {
   return { numPages: pdf.numPages, labels };
 }
 
+/** Transform from PDF user space to Gridline page points (scale 1), and the page index in its file. */
+export async function pageTransform(pageKey) {
+  const page = await getPage(pageKey);
+  const vp = page.getViewport({ scale: 1 });
+  return { transform: vp.transform, index: page._pageIndex != null ? page._pageIndex : +pageKey.split(':')[1] - 1, w: vp.width, h: vp.height };
+}
+
 /** The PDF's bytes, straight from PDF.js (so Gridline doesn't keep a second copy in memory). */
 export async function documentBytes(docId) {
   const pdf = docs.get(docId);

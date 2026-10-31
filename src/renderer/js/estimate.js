@@ -110,7 +110,9 @@ export function renderEstimate() {
       <label class="field" style="flex-direction:row;align-items:center;gap:8px"><span>Units</span>
         <select id="unitSelect" style="width:auto"><option value="ft" ${p.unit === 'ft' ? 'selected' : ''}>Imperial (ft)</option><option value="m" ${p.unit === 'm' ? 'selected' : ''}>Metric (m)</option></select></label>
       <label class="field" style="flex-direction:row;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="estDetail" ${showDetail ? 'checked' : ''} style="width:auto;height:auto" /><span>Breakdown by sheet &amp; view</span></label>
-      <button class="btn" id="btnExportCsv">${icon('download', 16)} Export CSV</button>
+      <button class="btn" id="btnExportPdf">${icon('file', 16)} Marked-up PDF</button>
+      <button class="btn" id="btnExportCsv" title="Plain CSV">${icon('download', 16)} CSV</button>
+      <button class="btn primary" id="btnExportXlsx">${icon('download', 16)} Excel</button>
     </div>
     <div class="est-layout">
       <div class="card" style="overflow:auto">
@@ -163,6 +165,8 @@ export function renderEstimate() {
     renderEstimate();
   };
   $('#btnExportCsv', el).onclick = () => actions.exportCsv();
+  $('#btnExportXlsx', el).onclick = () => actions.exportXlsx();
+  $('#btnExportPdf', el).onclick = () => actions.exportPdf();
 }
 
 export function estimateCsv() {

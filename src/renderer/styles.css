@@ -2012,8 +2012,14 @@ kbd {
 }
 .ai-foot {
   padding: 0 12px 10px;
-  text-align: center;
   font-size: 11px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#aiSpeed {
+  font-variant-numeric: tabular-nums;
 }
 .ai-empty p {
   color: var(--text-2);
@@ -2536,4 +2542,16 @@ table.est tr.detail .detail-where {
 }
 .review-banner b {
   color: #f5a524;
+}
+
+#stage #compareCanvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  filter: none; /* drawn in colours that already match the drawing mode */
+}
+.compare-bar {
+  gap: 10px;
+  white-space: nowrap;
+  font-weight: 500;
 }

@@ -9,7 +9,7 @@ import { fillAt, clearFillCache } from './fill.js';
 import { markupPitch } from './geometry.js';
 import { initPanels, renderSheets, renderConditions, renderInspector, setSheetMode } from './panels.js';
 import { initEstimate, renderEstimate, estimateCsv } from './estimate.js';
-import { conditionDialog, calibrateDialog, scaleOptionsHtml, presetToScale, shortcutsDialog, aboutDialog, settingsDialog, appearancePopover, libraryDialog, TYPE_INFO } from './dialogs.js';
+import { conditionDialog, calibrateDialog, scaleOptionsHtml, presetToScale, shortcutsDialog, aboutDialog, settingsDialog, appearancePopover, libraryDialog, pdfExportDialog, TYPE_INFO } from './dialogs.js';
 import { openPalette } from './palette.js';
 import { initAppearance, onAppearance, appearance, set as setAppearance, cycleBase, toggleDarkDrawings, THEMES, DRAWING_MODES } from './appearance.js';
 import { SCALE_PRESETS, pickSheetScale } from './units.js';
@@ -86,6 +86,8 @@ const panelActions = {
   copyScaleToAll,
   detectScales,
   saveToLibrary: (ids) => saveToLibrary(ids),
+  copyMarkups: (key) => copyMarkups(key),
+  compareWith: (key) => compareWith(key),
   reviewNext: (afterClear) => reviewNext(afterClear),
   activateCondition,
   editCondition,
@@ -96,7 +98,7 @@ const panelActions = {
   refresh: () => refresh('ui'),
 };
 initPanels(panelActions);
-initEstimate({ setUnit, exportCsv });
+initEstimate({ setUnit, exportCsv, exportXlsx: () => exportXlsx(), exportPdf: () => exportPdf() });
 
 initAppearance();
 onAppearance(() => {
@@ -139,6 +141,7 @@ function redraw() {
 
 function onViewChange() {
   redraw();
+  placeCompare();
   $('#zoomReadout').textContent = Math.round(view.zoom * 100) + '%';
 }
 
@@ -468,6 +471,47 @@ async function exportCsv() {
   if (p) toast('Estimate exported', { kind: 'ok', timeout: 2000 });
 }
 
+async function exportXlsx() {
+  if (!store.project.conditions.length) return toast('Nothing to export yet — create some conditions first.');
+  const { estimateXlsx } = await import('./exporters.js');
+  const bytes = estimateXlsx();
+  if (api.exportBytes) {
+    const p = await api.exportBytes({ bytes, defaultName: `${store.project.name} - Estimate.xlsx`, ext: 'xlsx', label: 'Excel workbook', open: false });
+    if (p) toast('Excel estimate exported', { kind: 'ok', timeout: 2200 });
+  } else {
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([bytes])), download: `${store.project.name} - Estimate.xlsx` });
+    a.click();
+  }
+}
+
+async function exportPdf() {
+  const p = store.project;
+  if (!p.documents.length) return toast('Add drawings first.');
+  const keys = orderedPageKeys();
+  const marked = keys.filter((k) => p.markups.some((m) => m.pageKey === k));
+  const r = await pdfExportDialog({ current: store.ui.pageKey ? p.pages[store.ui.pageKey].name : null, withMarkups: marked.length, all: keys.length });
+  if (!r) return;
+  const pageKeys = r.which === 'marked' ? marked : r.which === 'all' ? keys : [store.ui.pageKey];
+  const busy = toast(`Building PDF (${pageKeys.length} sheet${pageKeys.length === 1 ? '' : 's'})…`, { timeout: 0 });
+  try {
+    const { markedUpPdf } = await import('./exporters.js');
+    const bytes = await markedUpPdf({ pageKeys, legend: r.legend, labels: r.labels, summary: r.summary });
+    busy.remove();
+    if (api.exportBytes) {
+      const out = await api.exportBytes({ bytes, defaultName: `${p.name} - Takeoff.pdf`, ext: 'pdf', label: 'PDF', open: r.open });
+      if (out) toast('Marked-up PDF exported', { kind: 'ok', timeout: 2200 });
+    } else {
+      const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' })), download: `${p.name} - Takeoff.pdf` });
+      a.click();
+    }
+    return bytes;
+  } catch (e) {
+    busy.remove();
+    console.error(e);
+    toast("Couldn't build the PDF: " + (e.message || e), { kind: 'err', timeout: 7000 });
+  }
+}
+
 async function removeDocument(docId) {
   const d = store.project.documents.find((x) => x.id === docId);
   const n = store.project.markups.filter((m) => m.pageKey.startsWith(docId + ':')).length;
@@ -515,6 +559,7 @@ async function goToPage(key) {
   if (!key || !store.project.pages[key]) return;
   cancelDraft();
   measure = null;
+  if (comparing && comparing.newKey !== key) stopCompare();
   store.ui.pageKey = key;
   store.ui.selectedMarkupId = null;
   snapIndex = null;
@@ -1197,7 +1242,7 @@ document.addEventListener('keydown', (e) => {
   const k = e.key;
   if (e.ctrlKey || e.metaKey) {
     if (!api.__shim) return; // Electron menu accelerators handle these.
-    const map = { s: () => saveProject(e.shiftKey), o: () => openProject(), z: () => menuCmd('undo'), y: () => menuCmd('redo'), e: () => exportCsv(), w: () => closeProject(), ',': () => openSettings(), k: () => showPalette(), d: () => e.shiftKey && toggleDarkDrawings() };
+    const map = { c: () => menuCmd('copy'), v: () => menuCmd('paste'), s: () => saveProject(e.shiftKey), o: () => openProject(), z: () => menuCmd('undo'), y: () => menuCmd('redo'), e: () => exportCsv(), w: () => closeProject(), ',': () => openSettings(), k: () => showPalette(), d: () => e.shiftKey && toggleDarkDrawings() };
     if (map[k.toLowerCase()]) {
       e.preventDefault();
       map[k.toLowerCase()]();
@@ -1416,6 +1461,97 @@ async function openLibrary() {
   } else if (r.changed) toast('Library updated', { timeout: 1500 });
 }
 
+// ---------- Revision compare ----------
+let comparing = null; // { newKey, oldKey, canvas, stats }
+function compareWith(key = store.ui.pageKey) {
+  if (!key) return toast('Open a sheet first.');
+  const items = orderedPageKeys()
+    .filter((k) => k !== key)
+    .map((k) => ({ label: store.project.pages[k].name, hint: store.project.documents.find((d) => k.startsWith(d.id + ':')).name, group: 'Compare with (older sheet)', icon: 'sheets', run: () => startCompare(key, k) }));
+  if (!items.length) return toast('Add the other revision as a PDF first, then compare.');
+  openPalette(items, { placeholder: `Compare ${store.project.pages[key].name} with… (pick the older revision)` });
+}
+async function startCompare(newKey, oldKey) {
+  stopCompare();
+  if (store.ui.pageKey !== newKey) await goToPage(newKey);
+  const busy = toast('Comparing sheets…', { timeout: 0 });
+  try {
+    const { compareSheets, COMPARE_DARK, COMPARE_LIGHT } = await import('./compare.js');
+    const dark = ['dark', 'blueprint'].includes(appearance().drawing);
+    const a = await viewer.pageSize(newKey);
+    const r = Math.min(2.5, Math.sqrt(10e6 / (a.w * a.h)));
+    const [gNew, gOld] = await Promise.all([viewer.renderGray(newKey, r), viewer.renderGray(oldKey, r)]);
+    // Align top-left; crop to the common size.
+    const W = Math.min(gNew.W, gOld.W),
+      H = Math.min(gNew.H, gOld.H);
+    const crop = (g) => {
+      if (g.W === W && g.H === H) return g.img;
+      const o = new Uint8Array(W * H);
+      for (let y = 0; y < H; y++) o.set(g.img.subarray(y * g.W, y * g.W + W), y * W);
+      return o;
+    };
+    const res = compareSheets(crop(gOld), crop(gNew), W, H, dark ? COMPARE_DARK : COMPARE_LIGHT);
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    c.id = 'compareCanvas';
+    c.getContext('2d').putImageData(new ImageData(res.rgba, W, H), 0, 0);
+    $('#stage').insertBefore(c, $('#overlay'));
+    comparing = { newKey, oldKey, canvas: c, r, stats: res };
+    placeCompare();
+    busy.remove();
+    const pct = (n) => ((n / Math.max(1, res.same + res.added + res.removed)) * 100).toFixed(1);
+    $('#compareText').innerHTML = `Comparing <b>${esc(store.project.pages[newKey].name)}</b> with <b>${esc(store.project.pages[oldKey].name)}</b> · <span style="color:#3b82f6">■ added ${pct(res.added)}%</span> · <span style="color:#e5484d">■ removed ${pct(res.removed)}%</span>`;
+    $('#compareBar').hidden = false;
+  } catch (e) {
+    busy.remove();
+    console.error(e);
+    toast("Couldn't compare those sheets.", { kind: 'err' });
+  }
+}
+function placeCompare() {
+  if (!comparing) return;
+  const z = view.zoom;
+  const c = comparing.canvas;
+  c.style.width = (c.width / comparing.r) * z + 'px';
+  c.style.height = (c.height / comparing.r) * z + 'px';
+}
+function stopCompare() {
+  if (!comparing) return;
+  comparing.canvas.remove();
+  comparing = null;
+  $('#compareBar').hidden = true;
+}
+$('#compareExit').onclick = stopCompare;
+$('#compareSwap').onclick = () => comparing && startCompare(comparing.oldKey, comparing.newKey);
+
+// ---------- Copy / paste markups (typical floors, repeated units) ----------
+let markupClipboard = null;
+function copyMarkups(pageKey) {
+  const p = store.project;
+  const list = pageKey ? p.markups.filter((m) => m.pageKey === pageKey) : p.markups.filter((m) => m.id === store.ui.selectedMarkupId);
+  if (!list.length) return toast(pageKey ? 'No markups on that sheet.' : 'Select a markup first (or right-click a sheet → Copy all markups).');
+  markupClipboard = { from: list[0].pageKey, items: JSON.parse(JSON.stringify(list)) };
+  toast(`Copied ${list.length} markup${list.length === 1 ? '' : 's'} — open another sheet and press Ctrl+V`, { timeout: 2600 });
+}
+function pasteMarkups(targetKey = store.ui.pageKey) {
+  if (!markupClipboard) return toast('Nothing copied yet.');
+  if (!targetKey) return;
+  const same = targetKey === markupClipboard.from;
+  const off = same ? 12 / view.zoom : 0; // paste on the same sheet: nudge so it's visible
+  const items = markupClipboard.items.map((m) => {
+    const c = { ...m, id: uid('mk'), pageKey: targetKey, points: m.points.map(([x, y]) => [x + off, y + off]) };
+    delete c.review;
+    delete c.sig;
+    return c;
+  });
+  commit((p) => items.forEach((m) => p.markups.push(m)), 'markups-live');
+  if (items.length === 1) store.ui.selectedMarkupId = items[0].id;
+  const unscaled = !store.project.pages[targetKey].scale;
+  toast(`Pasted ${items.length} markup${items.length === 1 ? '' : 's'}${unscaled ? ' — this sheet has no scale yet' : ''}`, { kind: unscaled ? '' : 'ok', timeout: 2200 });
+  refresh('ui');
+}
+
 // ---------- Flagged markups (assistant work that needs a human look) ----------
 async function reviewNext() {
   const order = orderedPageKeys();
@@ -1457,11 +1593,16 @@ function paletteItems() {
   A('New condition…', () => newCondition(), { icon: 'plus' });
   A('Condition library…', () => openLibrary(), { icon: 'layers' });
   A('Next flagged markup (assistant review)', () => reviewNext(), { icon: 'search' });
+  A('Compare this sheet with another (revisions)…', () => compareWith(), { icon: 'layers' });
+  A('Copy all markups on this sheet', () => copyMarkups(store.ui.pageKey), { icon: 'copy' });
+  A('Paste markups', () => pasteMarkups(), { icon: 'copy', keys: 'Ctrl+V' });
   A('Save all conditions to library', () => saveToLibrary(store.project.conditions.map((c) => c.id)), { icon: 'layers' });
   A('Add drawings (PDF)…', addPdfs, { icon: 'filePlus', keys: 'Ctrl+Shift+O' });
   A('Open project…', () => openProject(), { icon: 'folder', keys: 'Ctrl+O' });
   A('Save', () => saveProject(), { icon: 'save', keys: 'Ctrl+S' });
   A('Save as…', () => saveProject(true), { icon: 'save', keys: 'Ctrl+Shift+S' });
+  A('Export estimate to Excel (.xlsx)', exportXlsx, { icon: 'download', keys: 'Ctrl+Shift+E', top: true });
+  A('Export marked-up PDF…', exportPdf, { icon: 'download', keys: 'Ctrl+P' });
   A('Export estimate (CSV)', exportCsv, { icon: 'download', keys: 'Ctrl+E' });
   A('Go to estimate', () => setView('estimate'), { icon: 'table', keys: 'Ctrl+2' });
   A('Go to takeoff', () => setView('takeoff'), { icon: 'layers', keys: 'Ctrl+1' });
@@ -1576,6 +1717,16 @@ function menuCmd(name, arg) {
       return saveProject(true);
     case 'export-csv':
       return exportCsv();
+    case 'export-xlsx':
+      return exportXlsx();
+    case 'export-pdf':
+      return exportPdf();
+    case 'copy':
+      if (typing || (window.getSelection() && String(window.getSelection()))) return document.execCommand('copy');
+      return copyMarkups();
+    case 'paste':
+      if (typing) return document.execCommand('paste');
+      return pasteMarkups();
     case 'undo':
       if (typing) return document.execCommand('undo');
       if (undo()) toast('Undone', { timeout: 1000 });
@@ -1736,4 +1887,4 @@ async function installUpdate() {
 }
 
 // Expose a tiny hook for automated smoke tests.
-window.__gridline = { store, view, viewer, setAppearance, appearancePopover, showPalette, openLibrary, saveToLibrary, addPdfFiles, setTool, goToPage, newCondition, setView, menuCmd };
+window.__gridline = { store, view, viewer, setAppearance, appearancePopover, showPalette, openLibrary, saveToLibrary, exportPdf, exportXlsx, copyMarkups, pasteMarkups, startCompare, addPdfFiles, setTool, goToPage, newCondition, setView, menuCmd };

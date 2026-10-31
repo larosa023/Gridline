@@ -22,4 +22,13 @@ for (const dir of ['cmaps', 'standard_fonts', 'wasm', 'iccs']) {
   const from = path.join(pkg, dir);
   if (fs.existsSync(from)) fs.cpSync(from, path.join(dest, dir), { recursive: true });
 }
-console.log('[vendor] PDF.js copied to src/renderer/vendor/pdfjs');
+// Small ES-module builds used for exports (marked-up PDF, Excel).
+const extra = [
+  ['pdf-lib/dist/pdf-lib.esm.min.js', 'pdf-lib.min.mjs'],
+  ['fflate/esm/browser.js', 'fflate.mjs'],
+];
+for (const [from, to] of extra) {
+  const src = path.join(root, 'node_modules', from);
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(root, 'src', 'renderer', 'vendor', to));
+}
+console.log('[vendor] PDF.js, pdf-lib and fflate copied to src/renderer/vendor');

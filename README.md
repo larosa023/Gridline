@@ -29,6 +29,8 @@
 - **AI assistant (free, runs on your PC)** — click **Ask** (or press `/`) and tell it what to do: *"read the scale on every sheet"*, *"fill every room on A-101 as Carpet tile"*, *"count all the door tags"*, *"make a 6/12 roof condition at $145 a square"*, *"what are my totals?"*. It uses Gridline's own tools (auto-scale, Fill, counts, conditions, pricing) and can look at the sheet. Everything it does in one request is a single **Undo**.
   - Needs [Ollama](https://ollama.com/download) running on the same PC (no account needed). On first use the panel offers a one-click download of the recommended model (Qwen 3.8 27B, ~18 GB — a 24 GB GPU like an RTX 4090 runs it well). Any installed Ollama model with tool support can be picked from the panel.
   - **Measures from the real linework, not by eye.** It finds each view on a sheet (e.g. "1 – Proposed Front Elevation"), finds every closed zone in it, ignoring hatching, reads the finish tags inside each zone, and measures exact areas with openings (windows, doors, storefront) deducted automatically.
+  - **One-call workflows** — *"take off the finishes on A-203"* reads the finish schedule, creates a tagged condition per material and measures every elevation; *"do the flooring on A-101"* reads the room finish schedule and fills each room into its floor finish; *"count the doors"* reads the door schedule and counts by type.
+  - **Fast** — keeps the model loaded, reuses Ollama's prompt cache between steps, streams replies as they're written, and only "thinks" when planning or fixing a mistake (Auto / Always / Never in the model menu). Speed is shown under the chat box.
   - **Plans its work** as a visible checklist, **searches every sheet** for schedules and notes, **reads schedules as tables**, and does all math with an exact calculator — no mental arithmetic.
   - **Measures by finish tag** — conditions carry tags (BR-1, FC-1…); each zone is measured into the condition whose tag is inside it. Untagged zones are matched by hatch pattern (also against other elevations) and **flagged with a ?** for you to confirm; windows, doors and storefront are recognised as openings. **Check flagged** jumps through anything it wasn't sure about.
   - **Remembers project decisions** (e.g. "BR-1 = brick veneer per A-701") and checks tool inputs, suggesting the right sheet or condition name when one is mistyped.
@@ -43,7 +45,11 @@
   - **Quick measure** — one-off dimensions without saving a markup.
   - Shift snaps to 45°/90°. Edit by dragging vertices or whole shapes. Full undo/redo.
 - **Conditions** — named takeoff items with color, group/CSI division, waste %, and material + labor unit costs.
-- **Estimate** — quantities roll up live into a priced estimate grouped by division, with sales tax, overhead and profit. Choose what each item is priced by (LF, SF, CY, wall SF, EA). **Export to CSV** for Excel.
+- **Typicals** — set *Typical ×* on any markup (e.g. one unit plan × 12) and its quantities are multiplied everywhere; the label shows `×12`.
+- **Copy & paste markups** (`Ctrl+C` / `Ctrl+V`) — onto the same sheet or another one (same spot), or right-click a sheet → *Copy all markups*.
+- **Compare sheets** — right-click a sheet → *Compare with…* to overlay an older revision: added linework shows red, removed shows blue.
+- **Estimate** — quantities roll up live into a priced estimate grouped by division, with sales tax, overhead and profit. Choose what each item is priced by (LF, SF, CY, wall SF, EA).
+- **Exports** — **Excel** (`Ctrl+Shift+E`: estimate with live formulas, takeoff detail and sheet list), **Marked-up PDF** (`Ctrl+P`: your markups drawn as vectors on the original sheets, with a legend and summary page) and **CSV**.
 - **Projects** — a single portable `.gridline` file with the drawings embedded. Double-click to open.
 - **Built-in updater** — checks GitHub Releases on launch and every few hours, downloads in the background, then shows **Restart to update**. Also under *Help → Check for Updates*.
 - Dark and light themes.

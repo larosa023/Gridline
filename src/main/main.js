@@ -153,6 +153,18 @@ ipcMain.handle('dialog:export', async (_e, { text, defaultName, ext, label }) =>
   return r.filePath;
 });
 
+ipcMain.handle('dialog:export-bytes', async (_e, { bytes, defaultName, ext, label, open }) => {
+  const r = await dialog.showSaveDialog(win, {
+    title: 'Export',
+    defaultPath: defaultName,
+    filters: [{ name: label, extensions: [ext] }],
+  });
+  if (r.canceled) return null;
+  await fs.writeFile(r.filePath, Buffer.from(bytes));
+  if (open) shell.openPath(r.filePath);
+  return r.filePath;
+});
+
 ipcMain.handle('dialog:message', async (_e, opts) => {
   const r = await dialog.showMessageBox(win, opts);
   return r.response;

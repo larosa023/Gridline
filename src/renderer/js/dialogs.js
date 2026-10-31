@@ -479,3 +479,38 @@ export function libraryDialog(lib, projectConds) {
     },
   });
 }
+
+// ---------------------------------------------------------------------------------------
+// Marked-up PDF export options
+// ---------------------------------------------------------------------------------------
+export function pdfExportDialog({ current, withMarkups, all }) {
+  return modal({
+    title: 'Export marked-up PDF',
+    buttons: [
+      { label: 'Cancel', value: null },
+      { label: 'Export PDF', primary: true },
+    ],
+    build(body) {
+      body.append(
+        h(`<div class="settings">
+          <div class="settings-group">
+            <h3>Sheets</h3>
+            <label class="setting-row"><span><b>Sheets with markups</b><small>${withMarkups} sheet${withMarkups === 1 ? '' : 's'}</small></span><input type="radio" name="which" value="marked" ${withMarkups ? 'checked' : 'disabled'} /></label>
+            <label class="setting-row"><span><b>Current sheet</b><small>${esc(current || '—')}</small></span><input type="radio" name="which" value="current" ${withMarkups ? '' : 'checked'} ${current ? '' : 'disabled'} /></label>
+            <label class="setting-row"><span><b>All sheets</b><small>${all} sheet${all === 1 ? '' : 's'}</small></span><input type="radio" name="which" value="all" /></label>
+          </div>
+          <div class="settings-group">
+            <h3>Include</h3>
+            <label class="setting-row"><span><b>Legend on each sheet</b><small>Conditions on that sheet with their quantities</small></span><input type="checkbox" class="switch" name="legend" checked /></label>
+            <label class="setting-row"><span><b>Quantity labels</b></span><input type="checkbox" class="switch" name="labels" checked /></label>
+            <label class="setting-row"><span><b>Summary page</b><small>Estimate totals at the end</small></span><input type="checkbox" class="switch" name="summary" checked /></label>
+            <label class="setting-row"><span><b>Open when done</b></span><input type="checkbox" class="switch" name="open" checked /></label>
+          </div></div>`)
+      );
+    },
+    onSubmit(form) {
+      const on = (k) => form.querySelector(`[name=${k}]`).checked;
+      return { which: (form.querySelector('[name=which]:checked') || {}).value || 'current', legend: on('legend'), labels: on('labels'), summary: on('summary'), open: on('open') };
+    },
+  });
+}

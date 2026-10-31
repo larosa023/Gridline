@@ -155,6 +155,8 @@ function sheetRow(key, d) {
     contextMenu(e.clientX, e.clientY, [
       { label: 'Rename sheet', icon: 'tag', run: () => renameSheet(row, key) },
       { label: 'Copy scale to all sheets', icon: 'copy', run: () => actions.copyScaleToAll(key) },
+      { label: 'Copy all markups on this sheet', icon: 'copy', run: () => actions.copyMarkups(key) },
+      { label: 'Compare with another sheet…', icon: 'layers', run: () => actions.compareWith(key) },
       { label: 'Read scale from title block', icon: 'calibrate', run: () => actions.detectScales([key], true) },
       '-',
       { label: `Close "${d.name}"`, icon: 'x', danger: true, run: () => actions.removeDocument(d.id) },
@@ -358,7 +360,10 @@ export function renderInspector() {
     parts.push(`<div class="insp-section">
       <div class="insp-title">Selected markup</div>
 
-      <label class="field" style="margin-bottom:8px"><span>Label / view</span><input data-ml="label" value="${esc(m.label || '')}" placeholder="e.g. Elev 1 – Front" /></label>
+      <div class="fields" style="margin-bottom:8px">
+        <label class="field"><span>Label / view</span><input data-ml="label" value="${esc(m.label || '')}" placeholder="e.g. Elev 1 – Front" /></label>
+        <label class="field"><span>Typical ×</span><input data-ml="mult" type="number" min="1" step="1" value="${+m.mult > 1 ? +m.mult : 1}" title="Count this markup N times (e.g. a typical floor repeated 4 times)" /></label>
+      </div>
       ${rows}
       <div class="row">
         ${m.type === 'area' || m.type === 'roof' ? `<button class="btn small" data-act="deduct">${m.deduct ? 'Make additive' : 'Make deduction'}</button>` : ''}
@@ -408,6 +413,16 @@ export function renderInspector() {
       commit(() => (c[f] = v), 'conditions');
     };
     inp.addEventListener('change', save);
+    inp.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') inp.blur();
+    });
+  });
+  el.querySelectorAll('[data-ml="mult"]').forEach((inp) => {
+    inp.addEventListener('change', () => {
+      const v = Math.max(1, Math.round(+inp.value || 1));
+      commit(() => (v > 1 ? (m.mult = v) : delete m.mult), 'markups');
+    });
     inp.addEventListener('keydown', (e) => {
       e.stopPropagation();
       if (e.key === 'Enter') inp.blur();

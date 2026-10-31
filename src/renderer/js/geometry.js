@@ -100,7 +100,17 @@ export function markupPitch(m, cond) {
  * Raw quantities of one markup, in real units.
  * scale: { ptPerUnit, unit }. cond (optional) supplies pitch / roof-line settings.
  */
+/** A markup's typical multiplier ("this floor plan ×4"). */
+export const markupMult = (m) => (m && +m.mult > 0 ? +m.mult : 1);
+
 export function markupQuantities(m, scale, cond) {
+  const q = rawQuantities(m, scale, cond);
+  const n = markupMult(m);
+  if (n !== 1 && !q.unscaled) for (const k of ['length', 'planLength', 'area', 'perimeter', 'planArea', 'squares', 'count']) if (q[k] != null) q[k] *= n;
+  return q;
+}
+
+function rawQuantities(m, scale, cond) {
   const k = scale && scale.ptPerUnit ? scale.ptPerUnit : null;
   if (m.type === 'count') return { count: m.points.length };
   if (!k) return { unscaled: true };
